@@ -295,33 +295,22 @@ Before performing a cache lookup or save, the prompt and parameters are canonica
   ```
   - *No explicit fields or flags are needed in the request to enable provider-side caching.*
 
-- **Claude (Anthropic via Bedrock):**
-  - **Important:** When using Anthropic (Claude) via Amazon Bedrock, the `cache_control` parameter must be placed inside each relevant message/content block, *not* at the top level of the request. This follows AWS's requirements for prompt caching as described in [the official AWS documentation](https://aws.amazon.com/blogs/machine-learning/effectively-use-prompt-caching-on-amazon-bedrock/).
-  - Example (instrumented for provider cache, Bedrock-style):
+- **Claude:**
+  - Claude's API supports explicit prompt caching using the `cache_control` parameter. This can be set to `"enabled"` to allow provider-side caching of the prompt. Example (instrumented for provider cache):
   ```json
   {
     "max_tokens": 512,
     "messages": [
-      {
-        "role": "user",
-        "content": [
-          { "type": "text", "text": "Hi Claude!", "cache_control": { "type": "ephemeral" } }
-        ]
-      },
-      {
-        "role": "assistant",
-        "content": [
-          { "type": "text", "text": "Hello! How can I help you today?", "cache_control": { "type": "ephemeral" } }
-        ]
-      }
+      { "content": "Hi Claude!", "role": "user" },
+      { "content": "Hello! How can I help you today?", "role": "assistant" }
     ],
     "model": "claude-3-opus-20240229",
     "system": "You are Claude, an AI assistant. Help users politely.",
-    "user": "user456"
+    "user": "user456",
+    "cache_control": "enabled"
   }
   ```
-  - *Each relevant message content block includes a `cache_control` field (`{"type": "ephemeral"}`) to enable provider-side caching for that part of the prompt, per AWS Bedrock requirements.*
-  - If you are calling Anthropic directly (not via Bedrock), refer to Anthropic's own documentation for cache_control usage, as the placement may differ.
+  - *The addition of the `cache_control` field enables Anthropic's provider-side caching for this prompt.*
 
 These examples show how canonicalization ensures consistent, provider-agnostic cache keys by removing spurious differences such as whitespace, key order, and line ending style, and how, if supported, provider-side caching can be triggered for each provider.
 
