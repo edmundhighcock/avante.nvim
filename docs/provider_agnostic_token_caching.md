@@ -49,64 +49,18 @@ Cache Hit      Cache Miss
 ```
 
 #### Canonicalization Layer
-- **Purpose:** Ensure that logically equivalent requests (identical meaning/output) always yield the same cache key, and that trivial formatting differences do not produce cache misses.
-- **Normalization:**
-  - Canonicalize all string fields: trim leading/trailing whitespace, collapse redundant whitespace, and apply Unicode normalization (e.g., NFC).
-  - For prompts and system prompts, remove inconsistent line endings and convert to a standard (e.g., `\n`).
-  - Sort all parameter objects (e.g., tool lists, config dictionaries) by key for determinism.
-- **Parameter Inclusion:**
-  - The cache key **must** include all parameters that affect output, at a minimum: prompt, model name, temperature, system prompt, tool list, user identifier (if present), and any provider-specific parameters (e.g., top_p, max_tokens, stop sequences).
-  - For complex params (e.g., tool objects or config tables), serialize using sorted JSON or a deterministic encoding.
-- **Serialization:**
-  - Use a deterministic serialization format (e.g., JSON with sorted keys, canonical protobuf, stable hash) for the cache key. Avoid Lua tables with non-deterministic key order.
-  - If provider-specific quirks are suspected (e.g., undocumented OpenAI params), include as much metadata as possible and store original params alongside the cache value for future auditing or migration.
-  - Example: `{prompt, model, temperature, system_prompt, tools, user_id, provider_params}` → canonical JSON, then hash (e.g., SHA256).
-- **Provider Notes:**
-  - **OpenAI:** All params affecting output (including undocumented ones) may alter results. When in doubt, be conservative and include extra params.
-  - **AWS Bedrock & Anthropic:** Follow their recommendations for parameter normalization (see references). For tool use, sort tool lists and tool parameter objects.
-- **References:**
-  - [OpenAI prompt caching best practices](https://platform.openai.com/docs/guides/rate-limits/best-practices)
-  - [AWS Bedrock prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/best-practices.html)
-
+- Generates a normalized string or hash from the prompt, model name, temperature, system prompt, tools, and any other relevant params.
 - Ensures that logically equivalent requests produce identical cache keys.
 
-#### Cache Storage, Privacy & Security, and Invalidation
-- Maps canonicalized request keys to provider responses. For streaming/chunked completions, only complete and successfully delivered responses are cached; partial results produced during streaming, or results from cancelled/incomplete streams, are not cached. This ensures cache consistency and avoids storing incomplete or inconsistent outputs. Most providers (e.g., OpenAI, Anthropic) do not support partial streaming response caching, so the framework standardizes on caching only full results.
-- **Privacy & Security:**
-  - Support per-user or per-namespace isolation so that users cannot access each other's cached data in multi-tenant environments.
-  - Encrypt persistent cache data at rest and in transit, especially for production deployments or when storing sensitive information.
-  - Enforce access controls on cache operations to ensure only authorized users or services can access or modify cache entries.
-  - Support GDPR and right-to-erasure by allowing targeted removal (purge) of individual user's cached items on request.
-- Supports pluggable storage backends (file, SQLite, Redis, memory, etc.).
-- **Backend Requirements:**
-  - All backends must support atomic read/write operations to avoid race conditions.
-  - Backends should enable safe concurrent access from multiple threads or processes.
-  - Durable backends (e.g., file, SQLite, Redis) should ensure persistence across restarts; memory backends are for ephemeral use.
-  - Hot-reloading (dynamic backend reconfiguration) is recommended for production but optional for local/dev use.
-  - The framework should allow runtime backend swapping via config, environment variable, or API call.
-  - **Recommended defaults:** Use a file or memory backend for development, Redis or SQLite for production deployments.
-- **Expiration & Eviction:**
-  - Configurable policies: TTL (time-to-live), LRU (least recently used), and/or maximum size.
-  - Recommended default TTL is one week (as per OpenAI); LRU eviction is recommended for bounded caches.
-  - Cache entries should be versioned by provider/model. On provider/model version change, all affected cache entries must be invalidated automatically to prevent stale results. Automatic migration of cache entries is not supported by default for safety; manual review and purge/migration is recommended if model output compatibility is unclear.
-- **Partial Invalidation:**
-  - Support for manual purge (per-user, per-model, or full cache).
-  - Allow cache entries to be partitioned by user or model, enabling targeted invalidation if needed (e.g., user data erasure, rolling model upgrades).
-- **Manual Controls:**
-  - Expose hooks and/or CLI commands for explicit cache purge or refresh.
-- Stores metadata (timestamp, provider, version, etc.) for invalidation and observability.
+#### Cache Storage
+- Maps canonicalized request keys to provider responses (including partials if streaming).
+- Pluggable (simple file, SQLite, Redis, memory, etc.).
+- Stores metadata (timestamp, provider, version, etc.) for invalidation.
 
 #### API Integration Points
 - **Pre-call:** Check cache before making provider call. If cache hit, return result.
 - **Post-call:** Store result in cache after successful provider call.
 - **Invalidation:** Expose hooks for cache expiry, manual purge, or version migration.
-
-#### Error Handling & Observability
-- **Error Handling:** Treat the cache as a non-critical optimization. If the cache backend fails or is slow to respond, log a warning or error and fall back to a direct provider call. Never allow a cache outage to block completions.
-- **Observability:** Implement unified logging and metrics for cache operations:
-  - Track cache hits, misses, errors, and latency.
-  - Integrate with existing logging/metrics systems (if present) for visibility and debugging.
-  - Provide dashboards or reports to monitor cache performance and health.
 
 ---
 
@@ -146,16 +100,10 @@ return result
 
 ## Integration with Avante Codebase
 
-- **Provider Abstraction:**
-  - The cache framework is fully generic and integrates at the provider/model handler layer (e.g., in `bedrock.lua`, `openai.lua`, etc.), requiring no provider-specific hooks.
-  - All prompt/result cache logic sits between the user-facing API and the provider abstraction, so providers do not need to be modified individually.
-- **Prompt Logger Integration:**
-  - The cache is fully complementary to prompt logging, which exists for UX/history purposes, not cost reduction.
-  - Prompt logs and cache entries are kept separate; cache hits and misses should be clearly logged and optionally surfaced in the user interface to distinguish between reused and new completions.
-- **User Experience:**
-  - Users may be shown indicators or logs of whether a completion was served from cache or generated fresh, for transparency.
-- **Configuration:**
-  - Allow configuration of cache backend, expiration, and cache key strategy via the same config abstraction used elsewhere in Avante.
+- **Provider Abstraction:** Integrate cache checks and saves within the provider/model handler layer (e.g., in `bedrock.lua`, `openai.lua`, etc.).
+- **Canonicalization:** Leverage existing message parsing to generate keys. Include all parameters that affect output.
+- **Config:** Allow the user to configure the cache backend and key generation strategy.
+- **Prompt Logger:** The cache is complementary to prompt logging, which is for UX/history, not cost reduction.
 
 ---
 
