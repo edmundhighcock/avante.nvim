@@ -120,14 +120,72 @@ end
 - All parameters that affect output (model, temperature, tool list, user_id, etc.) must be included.
 - Result may be hashed (SHA256) for compactness.
 
+**Logic Details (Pseudocode):**
+
+```lua
+-- Canonicalization function: ensures logically equivalent requests yield the same cache key
+function canonicalize(prompt, params)
+  -- 1. Normalize prompt and any string-like parameters
+  local function normalize_str(s)
+    return s:trim()              -- Remove leading/trailing whitespace
+      :gsub("%s+", " ")        -- Collapse all whitespace to single space
+      :gsub("\r\n", "\n")     -- Normalize newlines
+      -- Optionally apply Unicode NFC normalization if a library is available
+  end
+
+  -- 2. Recursively sort all tables (by key), including nested tables and lists-of-tables
+  local function sort_table(t)
+    if type(t) ~= "table" then return t end
+    local keys = {}
+    for k in pairs(t) do table.insert(keys, k) end
+    table.sort(keys)
+    local out = {}
+    for _, k in ipairs(keys) do
+      out[k] = sort_table(t[k])
+    end
+    return out
+  end
+
+  -- 3. Normalize all relevant parameters
+  local normalized_params = {}
+  for k, v in pairs(params) do
+    if type(v) == "string" then
+      normalized_params[k] = normalize_str(v)
+    elseif type(v) == "table" then
+      normalized_params[k] = sort_table(v)   -- Sort recursively
+    else
+      normalized_params[k] = v               -- Numbers, booleans, etc.
+    end
+  end
+
+  -- 4. Compose a serialization object
+  local serialization_obj = {
+    prompt = normalize_str(prompt),
+    params = normalized_params
+  }
+
+  -- 5. Serialize to JSON with sorted keys (requires deterministic JSON lib)
+  local json_str = deterministic_json_encode(serialization_obj)  -- Must serialize tables with sorted keys
+
+  -- 6. Optionally hash the result (e.g., SHA256) for compact cache keys
+  local cache_key = sha256(json_str)
+  return cache_key
+end
+```
+**Key points:**
+- All parameters that affect output (prompt, model, temperature, system prompt, tool list, user_id, provider-specific params, etc.) must be included.
+- Parameter objects/lists (e.g., tools) must be sorted deterministically.
+- Strings must be trimmed, whitespace-collapsed, and newlines normalized.
+- Serialization must be deterministic (JSON with sorted keys or equivalent).
+- Resulting string can be hashed (SHA256) for cache key length, but original can be stored for audit/debug.
+
 **Files to Modify/Create:**
 - `lua/avante/utils/canonicalize.lua` (new): Implement canonicalization logic for structured prompts, recursively normalizing all objects and arrays.
 - `lua/avante/utils/init.lua`: Export the canonicalization function.
 - Update provider implementation files to use canonicalizer for cache keys if necessary.
 
 **Testing:**
-- Write unit tests for canonicalization edge cases: whitespace, param order, unicode, nested tables, tool list sorting, message/job arrays, and deeply nested structures.
-- Test that the cache supports lookup and save for both full prompts and all prefixes of the message array—simulate incremental conversation and verify reuse of cached prefixes.
+- Write unit tests for canonicalization edge cases: whitespace, param order, unicode, nested tables, tool list sorting, etc.
 
 ---
 
@@ -209,138 +267,10 @@ end
 **Functionality:**
 Insert cache lookup/save logic so all provider calls (OpenAI, Bedrock, Anthropic, etc.) first check cache before making API calls and save results after.
 
-**Canonicalization Examples:**
-Before performing a cache lookup or save, the prompt and parameters are canonicalized. Here are illustrative examples for two major providers:
-
-**OpenAI Example:**
-- *Before canonicalization (as constructed in code, with inconsistent whitespace and unordered keys):*
-```json
-{
-  "model": "gpt-3.5-turbo",
-  "temperature": 0.7,
-  "messages": [
-    { "role": "system",   "content": "  You are a helpful assistant. \n\nPlease answer clearly.  " },
-    { "role": "user", "content": "What's\nthe weather today?    " },
-    { "role": "assistant", "content": " The weather today is sunny.\n" }
-  ],
-  "tools": [
-    { "name": "get_weather", "parameters": { "location": " New York " } }
-  ],
-  "user": " user123 "
-}
-```
-- *After canonicalization (normalized whitespace, sorted keys, standardized newlines):*
-```json
-{
-  "messages": [
-    { "content": "You are a helpful assistant. Please answer clearly.", "role": "system" },
-    { "content": "What's the weather today?", "role": "user" },
-    { "content": "The weather today is sunny.", "role": "assistant" }
-  ],
-  "model": "gpt-3.5-turbo",
-  "temperature": 0.7,
-  "tools": [
-    { "name": "get_weather", "parameters": { "location": "New York" } }
-  ],
-  "user": "user123"
-}
-```
-
-**Claude Example:**
-- *Before canonicalization:*
-```json
-{
-  "system": "   You are Claude, an AI assistant. \n Help users politely.  ",
-  "messages": [
-    { "role": "user", "content": "  Hi Claude!   " },
-    { "role": "assistant", "content": " Hello! How can I help you today?\n" }
-  ],
-  "model": "claude-3-opus-20240229",
-  "max_tokens": 512,
-  "user": "   user456"
-}
-```
-- *After canonicalization:*
-```json
-{
-  "max_tokens": 512,
-  "messages": [
-    { "content": "Hi Claude!", "role": "user" },
-    { "content": "Hello! How can I help you today?", "role": "assistant" }
-  ],
-  "model": "claude-3-opus-20240229",
-  "system": "You are Claude, an AI assistant. Help users politely.",
-  "user": "user456"
-}
-```
-
-**Provider-side cache instrumentation examples:**
-
-- **OpenAI:**
-  - OpenAI's prompt caching is applied automatically for eligible models (e.g., GPT-4, GPT-3.5) and for prompts longer than a certain token threshold. No special fields or explicit instrumentation are required to trigger caching. Submitting the canonicalized prompt as shown above is sufficient. Example (instrumented for provider cache is identical to after-canonicalization):
-  ```json
-  {
-    "messages": [
-      { "content": "You are a helpful assistant. Please answer clearly.", "role": "system" },
-      { "content": "What's the weather today?", "role": "user" },
-      { "content": "The weather today is sunny.", "role": "assistant" }
-    ],
-    "model": "gpt-3.5-turbo",
-    "temperature": 0.7,
-    "tools": [
-      { "name": "get_weather", "parameters": { "location": "New York" } }
-    ],
-    "user": "user123"
-  }
-  ```
-  - *No explicit fields or flags are needed in the request to enable provider-side caching.*
-
-- **Claude:**
-  - Claude's API supports explicit prompt caching using the `cache_control` parameter. This can be set to `"enabled"` to allow provider-side caching of the prompt. Example (instrumented for provider cache):
-  ```json
-  {
-    "max_tokens": 512,
-    "messages": [
-      { "content": "Hi Claude!", "role": "user" },
-      { "content": "Hello! How can I help you today?", "role": "assistant" }
-    ],
-    "model": "claude-3-opus-20240229",
-    "system": "You are Claude, an AI assistant. Help users politely.",
-    "user": "user456",
-    "cache_control": "enabled"
-  }
-  ```
-  - *The addition of the `cache_control` field enables Anthropic's provider-side caching for this prompt.*
-
-These examples show how canonicalization ensures consistent, provider-agnostic cache keys by removing spurious differences such as whitespace, key order, and line ending style, and how, if supported, provider-side caching can be triggered for each provider.
-
 **Logic Details (Pseudocode):**
 
 ```lua
--- For Claude/Bedrock, inject cache_control={type="ephemeral"} into each static message.content block to enable prompt caching
-function instrument_claude_prompt_with_cache_control(messages, static_prefix_len)
-  -- messages: array of Claude/Bedrock message objects
-  -- static_prefix_len: number of leading messages to treat as static (to be cached)
-  for i = 1, static_prefix_len do
-    local msg = messages[i]
-    if msg and msg.content and type(msg.content) == "table" then
-      for _, item in ipairs(msg.content) do
-        if item.type == "text" then
-          item.cache_control = { type = "ephemeral" }
-        end
-      end
-    end
-  end
-end
-
-function call_with_cache(prompt, params, provider)
-  -- For Claude/Bedrock: instrument prompt with cache_control before API call
-  if provider == "claude" or provider == "bedrock_claude" then
-    -- Determine which messages are static (to be cached)
-    local static_prefix_len = compute_static_prefix_length(prompt.messages, params)
-    instrument_claude_prompt_with_cache_control(prompt.messages, static_prefix_len)
-  end
-
+function call_with_cache(prompt, params)
   local cache_key = canonicalize(prompt, params)
   local cached = Cache:lookup(cache_key)
   if cached then
@@ -355,7 +285,6 @@ end
 ```
 
 - Insert this logic in the orchestrator/provider call flow (e.g., in `llm.lua` or provider wrappers).
-- If using Claude/Bedrock, be sure to instrument the prompt as shown above so cache_control fields are present in all static content blocks that should be cached.
 - Ensure all provider-affecting parameters are included in the canonicalization.
 - Avoid double-caching or cache pollution by only saving on completed, successful calls.
 - Minimize refactoring in provider-specific files by centralizing cache logic where possible.
