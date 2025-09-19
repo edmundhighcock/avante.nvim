@@ -45,7 +45,6 @@ end
 ---@param index integer
 ---@return integer
 function M:count_tokens_before(messages, system_prompt, index)
-  local Utils = require("avante.utils")
   local token_count = 0
 
   -- Count tokens in system prompt
