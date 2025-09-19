@@ -49,9 +49,11 @@ function M.build_bedrock_payload(provider, prompt_opts, request_body)
   -- Add cache_control to system prompt if prompt caching is supported and enabled
   if M.support_prompt_caching and prompt_caching_enabled and system_prompt ~= "" then
     system_prompt = {
-      type = "text",
-      text = system_prompt,
-      cache_control = { type = "ephemeral" }
+      {
+        type = "text",
+        text = system_prompt,
+        cache_control = { type = "ephemeral" }
+      }
     }
   end
 
