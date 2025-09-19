@@ -3140,15 +3140,75 @@ function Sidebar:create_token_usage_container()
   local token_tracker = TokenUsageTracker:get_tracker()
   local usage_analysis = token_tracker:analyze_usage()
 
-  -- If no usage data, don't create container
-  if usage_analysis.total_tokens == 0 then
-    if self.containers.token_usage and Utils.is_valid_container(self.containers.token_usage) then
-      self.containers.token_usage:unmount()
+  -- Always create the container if tracking is enabled
+  local safe_height = math.min(token_usage_config.window_height or 3, math.max(1, vim.o.lines - 5))
+
+  if not Utils.is_valid_container(self.containers.token_usage, true) then
+    self.containers.token_usage = Split({
+      enter = false,
+      relative = {
+        type = "win",
+        winid = self:get_split_candidate("token_usage"),
+      },
+      buf_options = vim.tbl_deep_extend("force", buf_options, {
+        modifiable = false,
+        swapfile = false,
+        buftype = "nofile",
+        bufhidden = "wipe",
+        filetype = "AvanteTokenUsage",
+      }),
+      win_options = vim.tbl_deep_extend("force", base_win_options, {
+        fillchars = Config.windows.fillchars,
+      }),
+      position = "bottom",
+      size = {
+        height = safe_height,
+      },
+    })
+
+    local ok, err = pcall(function()
+      self.containers.token_usage:mount()
+      self:setup_window_navigation(self.containers.token_usage)
+    end)
+    if not ok then
+      Utils.debug("Failed to create token usage container:", err)
+      self.containers.token_usage = nil
+      return
     end
-    self.containers.token_usage = nil
-    self:adjust_layout()
-    return
   end
+
+  local token_usage_buf = api.nvim_win_get_buf(self.containers.token_usage.winid)
+  Utils.unlock_buf(token_usage_buf)
+
+  local token_usage_lines = {
+    string.format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours),
+    usage_analysis.total_tokens > 0 and string.format("Total Tokens: %d", usage_analysis.total_tokens) or "No tokens used yet",
+    usage_analysis.total_tokens > 0 and string.format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0) or ""
+  }
+
+  -- Render provider breakdown if tokens exist
+  if usage_analysis.total_tokens > 0 then
+    for provider, models in pairs(usage_analysis.providers) do
+      table.insert(token_usage_lines, string.format("\n📊 %s:", provider:upper()))
+      for model, tokens in pairs(models) do
+        table.insert(token_usage_lines, string.format("  %s: %d tokens", model, tokens))
+      end
+    end
+  end
+
+  api.nvim_buf_set_lines(token_usage_buf, 0, -1, false, token_usage_lines)
+  Utils.lock_buf(token_usage_buf)
+
+  self:render_header(
+    self.containers.token_usage.winid,
+    token_usage_buf,
+    Utils.icon(" ") .. "Token Usage",
+    Highlights.SUBTITLE,
+    Highlights.REVERSED_SUBTITLE
+  )
+
+  local ok, err = pcall(function() self:adjust_layout() end)
+  if not ok then Utils.debug("Failed to adjust layout after token usage creation:", err) end
 
   -- Calculate safe height to prevent "Not enough room" error
   local safe_height = math.min(token_usage_config.window_height or 3, math.max(1, vim.o.lines - 5))
