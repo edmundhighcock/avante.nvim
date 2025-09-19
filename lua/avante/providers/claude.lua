@@ -137,10 +137,31 @@ end
 ---@return avante.LLMTokenUsage | nil
 function M.transform_anthropic_usage(usage)
   if not usage then return nil end
+
+  -- Calculate cache stats
+  local cache_hit_tokens = usage.cache_read_input_tokens or 0
+  local cache_write_tokens = usage.cache_creation_input_tokens or 0
+  local total_input_tokens = usage.input_tokens or 0
+  local cache_hit_rate = total_input_tokens > 0 and (cache_hit_tokens / total_input_tokens) or 0
+
+  -- Record stats for visualization
+  if not M.cache_stats then M.cache_stats = {} end
+  table.insert(M.cache_stats, {
+    timestamp = os.time(),
+    cache_hit_tokens = cache_hit_tokens,
+    cache_write_tokens = cache_write_tokens,
+    total_input_tokens = total_input_tokens,
+    cache_hit_rate = cache_hit_rate
+  })
+
+  -- Return usage info with cache metrics
   ---@type avante.LLMTokenUsage
   local res = {
-    prompt_tokens = usage.input_tokens + usage.cache_creation_input_tokens,
-    completion_tokens = usage.output_tokens + usage.cache_read_input_tokens,
+    prompt_tokens = total_input_tokens + cache_write_tokens,
+    completion_tokens = usage.output_tokens,
+    cache_hit_tokens = cache_hit_tokens,
+    cache_write_tokens = cache_write_tokens,
+    cache_hit_rate = cache_hit_rate
   }
   return res
 end
@@ -368,7 +389,10 @@ function M:parse_curl_args(prompt_opts)
     end
   end
 
-  if self.support_prompt_caching then
+  -- Check if prompt caching is enabled for this provider
+  local prompt_caching_enabled = Config.prompt_caching and Config.prompt_caching.enabled and Config.prompt_caching.providers.claude
+
+  if self.support_prompt_caching and prompt_caching_enabled then
     if #messages > 0 then
       local found = false
       for i = #messages, 1, -1 do

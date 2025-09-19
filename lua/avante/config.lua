@@ -47,6 +47,14 @@ M._defaults = {
   system_prompt_providers = {},
   ---@type string | fun(): string | nil
   override_prompt_dir = nil,
+  -- Prompt caching configuration
+  prompt_caching = {
+    enabled = true,  -- Global enable/disable
+    providers = {
+      claude = true,
+      bedrock = true
+    }
+  },
   rules = {
     project_dir = nil, ---@type string | nil (could be relative dirpath)
     global_dir = nil, ---@type string | nil (absolute dirpath)
