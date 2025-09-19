@@ -205,12 +205,51 @@ M.state = nil
 
 M.api_key_name = ""
 M.tokenizer_id = "gpt-4o"
+M.support_prompt_caching = true
 M.role_map = {
   user = "user",
   assistant = "assistant",
 }
 
+---@return boolean
+function M:is_claude_model()
+  local provider_conf = Providers.parse_config(self)
+  local model_name = provider_conf.model:lower()
+  return model_name:match("claude") ~= nil
+end
+
 function M:is_disable_stream() return false end
+
+---@param usage table | nil
+---@return table | nil
+function M.transform_copilot_claude_usage(usage)
+  if not usage then return nil end
+
+  -- Calculate cache stats
+  local cache_hit_tokens = usage.cache_read_input_tokens or 0
+  local cache_write_tokens = usage.cache_creation_input_tokens or 0
+  local total_input_tokens = usage.input_tokens or 0
+  local cache_hit_rate = total_input_tokens > 0 and (cache_hit_tokens / total_input_tokens) or 0
+
+  -- Record stats for visualization
+  if not M.cache_stats then M.cache_stats = {} end
+  table.insert(M.cache_stats, {
+    timestamp = os.time(),
+    cache_hit_tokens = cache_hit_tokens,
+    cache_write_tokens = cache_write_tokens,
+    total_input_tokens = total_input_tokens,
+    cache_hit_rate = cache_hit_rate
+  })
+
+  -- Return usage info with cache metrics
+  return {
+    prompt_tokens = total_input_tokens + cache_write_tokens,
+    completion_tokens = usage.output_tokens,
+    cache_hit_tokens = cache_hit_tokens,
+    cache_write_tokens = cache_write_tokens,
+    cache_hit_rate = cache_hit_rate
+  }
+end
 
 setmetatable(M, { __index = OpenAI })
 
@@ -283,6 +322,14 @@ function M:parse_curl_args(prompt_opts)
   local provider_conf, request_body = Providers.parse_config(self)
   local disable_tools = provider_conf.disable_tools or false
 
+  -- Check if this is a Claude model and if prompt caching is enabled
+  local is_claude = self:is_claude_model()
+  local Config = require("avante.config")
+  local prompt_caching_enabled = Config.prompt_caching and
+                                Config.prompt_caching.enabled and
+                                Config.prompt_caching.providers and
+                                Config.prompt_caching.providers.copilot
+
   local use_ReAct_prompt = provider_conf.use_ReAct_prompt == true
 
   local tools = {}
@@ -294,10 +341,59 @@ function M:parse_curl_args(prompt_opts)
 
   local headers = self:build_headers()
 
+  -- Add Claude-specific headers for prompt caching if applicable
+  if is_claude and prompt_caching_enabled then
+    headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+  end
+
   if prompt_opts.messages and #prompt_opts.messages > 0 then
     local last_message = prompt_opts.messages[#prompt_opts.messages]
     local initiator = last_message.role == "user" and "user" or "agent"
     headers["X-Initiator"] = initiator
+  end
+
+  -- Process messages for Claude prompt caching
+  local messages = self:parse_messages(prompt_opts)
+
+  -- Add cache_control to messages if prompt caching is enabled for Claude models
+  if is_claude and self.support_prompt_caching and prompt_caching_enabled and #messages > 0 then
+    local found = false
+    for i = #messages, 1, -1 do
+      local message = messages[i]
+      message = vim.deepcopy(message)
+      -- Handle content differently based on whether it's a string or array
+      if type(message.content) == "string" then
+        -- For string content, convert to object with cache_control
+        if message.role == "user" then
+          message.content = {
+            { type = "text", text = message.content, cache_control = { type = "ephemeral" } }
+          }
+          found = true
+          break
+        end
+      elseif type(message.content) == "table" then
+        -- For array content, add cache_control to the last text item
+        for j = #message.content, 1, -1 do
+          local item = message.content[j]
+          if type(item) == "table" and item.type == "text" then
+            item.cache_control = { type = "ephemeral" }
+            found = true
+            break
+          end
+        end
+      end
+      if found then
+        messages[i] = message
+        break
+      end
+    end
+  end
+
+  -- Add cache_control to tools if prompt caching is enabled for Claude models
+  if is_claude and self.support_prompt_caching and prompt_caching_enabled and #tools > 0 then
+    local last_tool = vim.deepcopy(tools[#tools])
+    last_tool.cache_control = { type = "ephemeral" }
+    tools[#tools] = last_tool
   end
 
   return {
@@ -308,7 +404,7 @@ function M:parse_curl_args(prompt_opts)
     headers = Utils.tbl_override(headers, self.extra_headers),
     body = vim.tbl_deep_extend("force", {
       model = provider_conf.model,
-      messages = self:parse_messages(prompt_opts),
+      messages = messages,
       stream = true,
       tools = tools,
     }, request_body),

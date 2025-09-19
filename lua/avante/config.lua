@@ -52,7 +52,8 @@ M._defaults = {
     enabled = true,  -- Global enable/disable
     providers = {
       claude = true,
-      bedrock = true
+      bedrock = true,
+      copilot = true
     }
   },
   rules = {
