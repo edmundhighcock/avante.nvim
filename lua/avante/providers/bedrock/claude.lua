@@ -9,6 +9,7 @@
 local P = require("avante.providers")
 local Claude = require("avante.providers.claude")
 local Config = require("avante.config")
+local Utils = require("avante.utils")
 
 ---@class AvanteBedrockModelHandler
 local M = {}
