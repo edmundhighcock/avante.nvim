@@ -3267,19 +3267,41 @@ function Sidebar:create_token_usage_container()
   local token_usage_buf = api.nvim_win_get_buf(self.containers.token_usage.winid)
   Utils.unlock_buf(token_usage_buf)
 
-  local token_usage_lines = {
-    string.format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours),
-    string.format("Total Tokens: %d", usage_analysis.total_tokens),
-    string.format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0)
-  }
+  local function safe_sanitize_line(line)
+    -- Remove newlines and trim whitespace
+    if type(line) ~= "string" then return tostring(line) end
+    return line:gsub("\n", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  end
 
-  -- Render provider breakdown
-  for provider, models in pairs(usage_analysis.providers) do
-    table.insert(token_usage_lines, string.format("\n📊 %s:", provider:upper()))
-    for model, tokens in pairs(models) do
-      table.insert(token_usage_lines, string.format("  %s: %d tokens", model, tokens))
+  local token_usage_lines = {}
+
+  -- Safely add usage summary lines
+  table.insert(token_usage_lines, safe_sanitize_line(string.format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours)))
+
+  if usage_analysis.total_tokens > 0 then
+    table.insert(token_usage_lines, safe_sanitize_line(string.format("Total Tokens: %d", usage_analysis.total_tokens)))
+    table.insert(token_usage_lines, safe_sanitize_line(string.format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0)))
+  else
+    table.insert(token_usage_lines, "No tokens used yet")
+  end
+
+  -- Render provider breakdown if tokens exist
+  if usage_analysis.total_tokens > 0 then
+    for provider, models in pairs(usage_analysis.providers) do
+      table.insert(token_usage_lines, "")  -- Add an empty line for separation
+      table.insert(token_usage_lines, safe_sanitize_line(string.format("📊 %s:", provider:upper())))
+      for model, tokens in pairs(models) do
+        table.insert(token_usage_lines, safe_sanitize_line(string.format("  %s: %d tokens", model, tokens)))
+      end
     end
   end
+
+  -- Filter out any empty or problematic lines
+  token_usage_lines = vim.iter(token_usage_lines)
+    :filter(function(line)
+      return type(line) == "string" and line ~= "" and not line:find("\n")
+    end)
+    :totable()
 
   api.nvim_buf_set_lines(token_usage_buf, 0, -1, false, token_usage_lines)
   Utils.lock_buf(token_usage_buf)
