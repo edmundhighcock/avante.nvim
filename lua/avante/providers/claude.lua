@@ -250,6 +250,30 @@ function M.transform_anthropic_usage(usage)
     ))
   end
 
+  local TokenUsageTracker = require("avante.token_usage")
+  local global_tracker = TokenUsageTracker:get_tracker()
+
+  -- Record token usage
+  global_tracker:record_usage({
+    provider = "claude",
+    model = usage.model or "unknown",
+    input_tokens = total_input_tokens,
+    output_tokens = usage.output_tokens or 0,
+    total_tokens = total_input_tokens + (usage.output_tokens or 0),
+    conversation_id = usage.conversation_id or "unknown"
+  })
+
+  -- Optionally log token usage details
+  if Config.behaviour.token_usage_tracking and Config.behaviour.token_usage_tracking.enabled then
+    Utils.info(string.format(
+      "Token Usage: provider=claude, model=%s, input_tokens=%d, output_tokens=%d, total_tokens=%d",
+      usage.model or "unknown",
+      total_input_tokens,
+      usage.output_tokens or 0,
+      total_input_tokens + (usage.output_tokens or 0)
+    ))
+  end
+
   -- Return usage info with cache metrics
   ---@type avante.LLMTokenUsage
   local res = {

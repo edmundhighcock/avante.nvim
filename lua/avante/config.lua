@@ -479,6 +479,22 @@ M._defaults = {
     auto_approve_tool_permissions = false, -- Default: show permission prompts for all tools
     auto_check_diagnostics = true,
     enable_fastapply = false,
+    ---@type avante.TokenUsageConfig
+    token_usage_tracking = {
+      enabled = false,        -- Global enable/disable
+      window_height = 3,      -- Height of the token usage window
+      time_window_hours = 24, -- Default time window for tracking
+      max_records = 1000,     -- Limit number of records to prevent memory bloat
+      providers = {           -- Optionally allow per-provider tracking
+        claude = true,
+        openai = true,
+        bedrock = true,
+      },
+      logging = {
+        persist = true,       -- Persist token usage between sessions
+        log_path = vim.fn.stdpath("data") .. "/avante/token_usage.json"
+      }
+    },
   },
   prompt_logger = { -- logs prompts to disk (timestamped, for replay/debugging)
     enabled = true, -- toggle logging entirely
