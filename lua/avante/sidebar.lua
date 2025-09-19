@@ -3276,11 +3276,15 @@ function Sidebar:create_token_usage_container()
   local token_usage_lines = {}
 
   -- Safely add usage summary lines
-  table.insert(token_usage_lines, safe_sanitize_line(string.format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours)))
+  local summary_line = safe_sanitize_line(string.format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours))
+  if summary_line ~= "" then table.insert(token_usage_lines, summary_line) end
 
   if usage_analysis.total_tokens > 0 then
-    table.insert(token_usage_lines, safe_sanitize_line(string.format("Total Tokens: %d", usage_analysis.total_tokens)))
-    table.insert(token_usage_lines, safe_sanitize_line(string.format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0)))
+    local total_tokens_line = safe_sanitize_line(string.format("Total Tokens: %d", usage_analysis.total_tokens))
+    if total_tokens_line ~= "" then table.insert(token_usage_lines, total_tokens_line) end
+
+    local avg_tokens_line = safe_sanitize_line(string.format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0))
+    if avg_tokens_line ~= "" then table.insert(token_usage_lines, avg_tokens_line) end
   else
     table.insert(token_usage_lines, "No tokens used yet")
   end
@@ -3288,13 +3292,33 @@ function Sidebar:create_token_usage_container()
   -- Render provider breakdown if tokens exist
   if usage_analysis.total_tokens > 0 then
     for provider, models in pairs(usage_analysis.providers) do
-      table.insert(token_usage_lines, "")  -- Add an empty line for separation
-      table.insert(token_usage_lines, safe_sanitize_line(string.format("📊 %s:", provider:upper())))
-      for model, tokens in pairs(models) do
-        table.insert(token_usage_lines, safe_sanitize_line(string.format("  %s: %d tokens", model, tokens)))
+      if type(provider) == "string" and provider ~= "" then
+        table.insert(token_usage_lines, "")  -- Add an empty line for separation
+
+        local provider_line = safe_sanitize_line(string.format("📊 %s:", provider:upper()))
+        if provider_line ~= "" then table.insert(token_usage_lines, provider_line) end
+
+        for model, tokens in pairs(models) do
+          if type(model) == "string" and model ~= "" then
+            local model_line = safe_sanitize_line(string.format("  %s: %d tokens", model, tokens))
+            if model_line ~= "" then table.insert(token_usage_lines, model_line) end
+          end
+        end
       end
     end
   end
+
+  -- Additional safety check to ensure we have at least one line
+  if #token_usage_lines == 0 then
+    table.insert(token_usage_lines, "No token usage data available")
+  end
+
+  -- Final sanitization and filtering
+  token_usage_lines = vim.iter(token_usage_lines)
+    :filter(function(line)
+      return type(line) == "string" and line ~= "" and not line:find("\n")
+    end)
+    :totable()
 
   -- Filter out any empty or problematic lines
   token_usage_lines = vim.iter(token_usage_lines)
