@@ -3140,93 +3140,6 @@ function Sidebar:create_token_usage_container()
   local token_tracker = TokenUsageTracker:get_tracker()
   local usage_analysis = token_tracker:analyze_usage()
 
-  -- Always create the container if tracking is enabled
-  local safe_height = math.min(token_usage_config.window_height or 3, math.max(1, vim.o.lines - 5))
-
-  if not Utils.is_valid_container(self.containers.token_usage, true) then
-    self.containers.token_usage = Split({
-      enter = false,
-      relative = {
-        type = "win",
-        winid = self:get_split_candidate("token_usage"),
-      },
-      buf_options = vim.tbl_deep_extend("force", buf_options, {
-        modifiable = false,
-        swapfile = false,
-        buftype = "nofile",
-        bufhidden = "wipe",
-        filetype = "AvanteTokenUsage",
-      }),
-      win_options = vim.tbl_deep_extend("force", base_win_options, {
-        fillchars = Config.windows.fillchars,
-      }),
-      position = "bottom",
-      size = {
-        height = safe_height,
-      },
-    })
-
-    local ok, err = pcall(function()
-      self.containers.token_usage:mount()
-      self:setup_window_navigation(self.containers.token_usage)
-    end)
-    if not ok then
-      Utils.debug("Failed to create token usage container:", err)
-      self.containers.token_usage = nil
-      return
-    end
-  end
-
-  local token_usage_buf = api.nvim_win_get_buf(self.containers.token_usage.winid)
-  Utils.unlock_buf(token_usage_buf)
-
-  local function safe_format(format_str, ...)
-    local ok, result = pcall(string.format, format_str, ...)
-    return ok and result or tostring(...)
-  end
-
-  local token_usage_lines = {}
-  table.insert(token_usage_lines, safe_format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours))
-
-  if usage_analysis.total_tokens > 0 then
-    table.insert(token_usage_lines, safe_format("Total Tokens: %d", usage_analysis.total_tokens))
-    table.insert(token_usage_lines, safe_format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0))
-  else
-    table.insert(token_usage_lines, "No tokens used yet")
-  end
-
-  -- Render provider breakdown if tokens exist
-  if usage_analysis.total_tokens > 0 then
-    for provider, models in pairs(usage_analysis.providers) do
-      table.insert(token_usage_lines, "")  -- Add an empty line for separation
-      table.insert(token_usage_lines, safe_format("📊 %s:", provider:upper()))
-      for model, tokens in pairs(models) do
-        table.insert(token_usage_lines, safe_format("  %s: %d tokens", model, tokens))
-      end
-    end
-  end
-
-  -- Remove any lines that might have newlines
-  token_usage_lines = vim.iter(token_usage_lines)
-    :filter(function(line)
-      return type(line) == "string" and not line:find("\n")
-    end)
-    :totable()
-
-  api.nvim_buf_set_lines(token_usage_buf, 0, -1, false, token_usage_lines)
-  Utils.lock_buf(token_usage_buf)
-
-  self:render_header(
-    self.containers.token_usage.winid,
-    token_usage_buf,
-    Utils.icon(" ") .. "Token Usage",
-    Highlights.SUBTITLE,
-    Highlights.REVERSED_SUBTITLE
-  )
-
-  local ok, err = pcall(function() self:adjust_layout() end)
-  if not ok then Utils.debug("Failed to adjust layout after token usage creation:", err) end
-
   -- Calculate safe height to prevent "Not enough room" error
   local safe_height = math.min(token_usage_config.window_height or 3, math.max(1, vim.o.lines - 5))
 
@@ -3235,7 +3148,7 @@ function Sidebar:create_token_usage_container()
       enter = false,
       relative = {
         type = "win",
-        winid = self:get_split_candidate("token_usage"),
+        winid = self:get_split_candidate("selected_files"),
       },
       buf_options = vim.tbl_deep_extend("force", buf_options, {
         modifiable = false,
@@ -3314,13 +3227,6 @@ function Sidebar:create_token_usage_container()
   end
 
   -- Final sanitization and filtering
-  token_usage_lines = vim.iter(token_usage_lines)
-    :filter(function(line)
-      return type(line) == "string" and line ~= "" and not line:find("\n")
-    end)
-    :totable()
-
-  -- Filter out any empty or problematic lines
   token_usage_lines = vim.iter(token_usage_lines)
     :filter(function(line)
       return type(line) == "string" and line ~= "" and not line:find("\n")
