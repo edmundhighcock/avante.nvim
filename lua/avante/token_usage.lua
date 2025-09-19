@@ -32,23 +32,7 @@ end
 ---Record token usage for a specific provider and model
 ---@param usage_data table Token usage information
 function TokenUsageTracker:record_usage(usage_data)
-  -- Use Neovim's notification system for logging
-  vim.notify(
-    string.format("Token Usage Record Called:\nConfig Enabled: %s\nUsage Data: %s",
-      tostring(self.config.enabled),
-      vim.inspect(usage_data)
-    ),
-    vim.log.levels.INFO,
-    {title = "Avante Token Usage"}
-  )
-
-  if not self.config.enabled then
-    vim.notify("Token tracking is disabled. Skipping record.",
-      vim.log.levels.WARN,
-      {title = "Avante Token Usage"}
-    )
-    return
-  end
+  if not self.config.enabled then return end
 
   usage_data.timestamp = os.time()
 
@@ -65,15 +49,6 @@ function TokenUsageTracker:record_usage(usage_data)
   vim.schedule(function()
     self:save_usage_log()
   end)
-
-  -- Confirm record
-  vim.notify(
-    string.format("Token Usage Recorded Successfully\nCurrent Usage Log Length: %d",
-      #self.usage_log
-    ),
-    vim.log.levels.INFO,
-    {title = "Avante Token Usage"}
-  )
 end
 
 ---Prune usage log based on time window and max records
@@ -100,11 +75,7 @@ function TokenUsageTracker:save_usage_log()
   vim.fn.mkdir(log_dir, "p")
 
   local json_content = vim.json.encode(self.usage_log)
-  local ok, _ = pcall(vim.fn.writefile, {json_content}, log_path)
-
-  if not ok then
-    print("Failed to save token usage log")
-  end
+  pcall(vim.fn.writefile, {json_content}, log_path)
 end
 
 ---Analyze token usage across providers and models
