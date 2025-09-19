@@ -3180,21 +3180,38 @@ function Sidebar:create_token_usage_container()
   local token_usage_buf = api.nvim_win_get_buf(self.containers.token_usage.winid)
   Utils.unlock_buf(token_usage_buf)
 
-  local token_usage_lines = {
-    string.format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours),
-    usage_analysis.total_tokens > 0 and string.format("Total Tokens: %d", usage_analysis.total_tokens) or "No tokens used yet",
-    usage_analysis.total_tokens > 0 and string.format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0) or ""
-  }
+  local function safe_format(format_str, ...)
+    local ok, result = pcall(string.format, format_str, ...)
+    return ok and result or tostring(...)
+  end
+
+  local token_usage_lines = {}
+  table.insert(token_usage_lines, safe_format("🔢 Token Usage (Last %d hours):", token_usage_config.time_window_hours))
+
+  if usage_analysis.total_tokens > 0 then
+    table.insert(token_usage_lines, safe_format("Total Tokens: %d", usage_analysis.total_tokens))
+    table.insert(token_usage_lines, safe_format("Avg Tokens/Request: %.2f", usage_analysis.avg_tokens_per_request or 0))
+  else
+    table.insert(token_usage_lines, "No tokens used yet")
+  end
 
   -- Render provider breakdown if tokens exist
   if usage_analysis.total_tokens > 0 then
     for provider, models in pairs(usage_analysis.providers) do
-      table.insert(token_usage_lines, string.format("\n📊 %s:", provider:upper()))
+      table.insert(token_usage_lines, "")  -- Add an empty line for separation
+      table.insert(token_usage_lines, safe_format("📊 %s:", provider:upper()))
       for model, tokens in pairs(models) do
-        table.insert(token_usage_lines, string.format("  %s: %d tokens", model, tokens))
+        table.insert(token_usage_lines, safe_format("  %s: %d tokens", model, tokens))
       end
     end
   end
+
+  -- Remove any lines that might have newlines
+  token_usage_lines = vim.iter(token_usage_lines)
+    :filter(function(line)
+      return type(line) == "string" and not line:find("\n")
+    end)
+    :totable()
 
   api.nvim_buf_set_lines(token_usage_buf, 0, -1, false, token_usage_lines)
   Utils.lock_buf(token_usage_buf)
