@@ -1180,6 +1180,8 @@ Avante provides a RAG service, which is a tool for obtaining the required contex
       extra = nil, -- Additional configuration options for the embedding model
     },
     docker_extra_args = "", -- Extra arguments to pass to the docker command
+          rag_search_retries = 1, -- Number of retries for RAG search in case of timeout
+    rag_search_timeout = 100000, -- Timeout for RAG search in milliseconds (default: 100 seconds)
   },
 ```
 
