@@ -253,6 +253,23 @@ local ErrorHandler = {
 local function get_available_tools()
   -- Import the lazy loading module for dynamic tool discovery
   local LazyLoading = require("avante.llm_tools.lazy_loading")
+  local Config = require("avante.config")
+
+  -- If lazy loading is not enabled, get all tools directly
+  if not Config.lazy_loading or not Config.lazy_loading.enabled then
+    local LLMTools = require("avante.llm_tools")
+    local all_tools = LLMTools._tools
+    return vim.tbl_filter(function(tool)
+      -- Exclude tools in the forbidden list
+      local is_forbidden = vim.tbl_contains(ToolValidator._forbidden_tools, tool.name)
+
+      -- Exclude the dispatch_full_agent tool itself
+      local is_self = tool.name == M.name
+
+      -- Only return tools that pass all safety checks
+      return not (is_forbidden or is_self)
+    end, all_tools)
+  end
 
   -- Retrieve all available tools without any initial filtering
   local all_tools = LazyLoading.get_tools("", {}, false)
