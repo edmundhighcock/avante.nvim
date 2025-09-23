@@ -272,7 +272,8 @@ local function get_available_tools()
   end
 
   -- Retrieve all available tools without any initial filtering
-  local all_tools = LazyLoading.get_tools("", {}, false)
+  local LLMTools = require("avante.llm_tools")
+  local all_tools = LLMTools.get_tools("", {}, false)
 
   -- Apply sophisticated filtering to ensure tool safety and prevent recursion
   return vim.tbl_filter(function(tool)
