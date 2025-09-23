@@ -104,6 +104,7 @@ function M.always_eager()
       "add_todos",
       "update_todo_status",
       "list_tools",
+      "dispatch_agent",
     }
 
     -- Merge user configuration with critical tools
