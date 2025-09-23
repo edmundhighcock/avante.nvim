@@ -31,24 +31,36 @@ function M.register_available_tool(server_name, tool_name)
 end
 
 function M.available_tools_with_name(tool_name)
-  available_tools = {}
-  for _, tool in ipairs(M._available_to_request) do
+  local available_tools = {}
+  for _, tool in pairs(M._available_to_request) do
+    -- print("TOOOLLLLL")
+    -- print(vim.inspect(tool))
     if tool.name == tool_name then
       available_tools[#available_tools+1] = tool
     end
   end
+  -- print("\n\n\n\nALL\n\n")
+  -- print(vim.inspect(M._available_to_request))
+  -- print("\n\n\n\nAVAILABLE\n\n")
+  --
+  -- print(vim.inspect(available_tools))
+  -- print(tool_name)
   return available_tools
 end
 
 function M.servers_with_available_tools_with_name_as_string(tool_name)
-  available_tools = M.available_tools_with_name(tool_name)
-  servers = ""
+  local available_tools = M.available_tools_with_name(tool_name)
+  local servers = ""
   for i = 1, #available_tools do
-    servers = servers .. tool.name
+    tool = available_tools[i]
+    servers = servers .. tool.server_name
     if i < #available_tools then
       servers = servers .. ", "
     end
   end
+  -- print("\n\n\n\nSERVERS\n\n")
+  -- print(servers)
+  -- print("\n\n\n\nEND\n\n")
   return servers
 end
 
@@ -463,7 +475,7 @@ function M.validate_mcp_tool(tool_use_input, on_complete)
         .. M.servers_with_available_tools_with_name_as_string(tool_use_input.tool_name) .. " ?",
       tool_use_input.tool_name,
       server_name
-    )
+    ) .. "Don't forget to load the tool with load_mcp_tool if necessary!"
     if on_complete then
       on_complete(false, error_msg)
     end
@@ -501,7 +513,8 @@ function M.check_tool_loading(tools, tool_use, Config)
   local key = server_name .. ":" .. tool_use.name
   if not M._available_to_request[key] then
     local error_msg = "Tool '" .. tool_use.name .. "' is not on server '" .. server_name .. "'. " ..
-      "Did you mean one of these servers: " .. M.servers_with_available_tools_with_name_as_string(tool_use.name) .. " ?"
+      "Did you mean one of these servers: " .. M.servers_with_available_tools_with_name_as_string(tool_use.name) .. " ?" ..
+      "Don't forget to load the tool with load_mcp_tool if necessary!"
     return false, error_msg
   end
   -- Special handling for use_mcp_tool
