@@ -5,8 +5,6 @@ local Base = require("avante.llm_tools.base")
 local History = require("avante.history")
 local Line = require("avante.ui.line")
 local Highlights = require("avante.highlights")
-local LLMTools = require("avante.llm_tools")
-local Llm = require("avante.llm")
 
 ---@class AvanteLLMTool
 local M = setmetatable({}, Base)
@@ -242,6 +240,7 @@ Apply strict usage constraints and provide a clear, concise summary of your find
     end,
   }
 
+  local Llm = require("avante.llm")
   Llm.agent_loop(agent_loop_options)
 end
 
