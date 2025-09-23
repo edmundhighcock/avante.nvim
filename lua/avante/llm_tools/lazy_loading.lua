@@ -669,8 +669,10 @@ function M.summarize_tool(tool)
     }
 
     -- Include only the name and summarized description
-    if summarized_tool.description then
-      minimal_tool.description = M.extract_first_sentence(summarized_tool.description)
+    -- Some tools have a property description, others have a function get_description
+    local description = summarized_tool.description or (summarized_tool.get_description and summarized_tool.get_description())
+    if description then
+      minimal_tool.description = M.extract_first_sentence(description)
     end
 
     return minimal_tool
