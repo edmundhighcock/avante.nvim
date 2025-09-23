@@ -77,8 +77,38 @@ local ExecutionContext = {
     total_token_consumption = 0,
     max_token_limit = 4096,    -- Configurable token limit
     current_depth = 0,         -- Track recursion depth
-    max_recursion_depth = 3    -- Prevent excessive nesting
+    max_recursion_depth = 3,   -- Prevent excessive nesting
+    working_directory = vim.fn.getcwd(), -- Default to current working directory
+    project_root = nil         -- Specific project root for file access validation
   },
+
+  ---@brief Set the working directory and project root for execution context
+  ---@param directory string The directory to set as working directory
+  set_working_directory = function(self, directory)
+    -- Validate and sanitize the directory path
+    local sanitized_dir = vim.fn.fnamemodify(directory, ":p")
+
+    -- Ensure the directory exists and is a directory
+    if vim.fn.isdirectory(sanitized_dir) ~= 1 then
+      error("Invalid working directory: " .. sanitized_dir)
+    end
+
+    self._state.working_directory = sanitized_dir
+    self._state.project_root = sanitized_dir
+  end,
+
+  ---@brief Validate if a path is within the allowed project root
+  ---@param path string The path to validate
+  ---@return boolean Whether the path is allowed
+  is_path_allowed = function(self, path)
+    if not self._state.project_root then return false end
+
+    -- Resolve the full, absolute path
+    local full_path = vim.fn.fnamemodify(path, ":p")
+
+    -- Check if the path starts with the project root
+    return full_path:sub(1, #self._state.project_root) == self._state.project_root
+  end,
 
   ---@brief Record and track the usage of a specific tool
   ---@param tool_name string The name of the tool being used
@@ -395,9 +425,12 @@ function M.func(input, opts)
   local tools = get_available_tools()
   local start_time = Utils.get_timestamp()
 
+  -- Set the working directory explicitly to the current project root
+  local context = ExecutionContext
+  context:set_working_directory(vim.fn.getcwd())
+
   -- Validate and filter tools
   local validated_tools = {}
-  local context = ExecutionContext
   local error_handler = ErrorHandler
 
   for _, tool in ipairs(tools) do
