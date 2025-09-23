@@ -78,23 +78,57 @@ local ExecutionContext = {
     max_token_limit = 4096,    -- Configurable token limit
     current_depth = 0,         -- Track recursion depth
     max_recursion_depth = 3,   -- Prevent excessive nesting
-    working_directory = vim.fn.getcwd(), -- Default to current working directory
-    project_root = nil         -- Specific project root for file access validation
+    working_directory = nil,   -- Explicitly set to nil initially
+    project_root = nil,        -- Specific project root for file access validation
+    last_known_good_directory = nil  -- Track the last valid directory
   },
+
+  ---@brief Reset the entire execution context to prevent state leakage
+  reset = function(self)
+    self._state = {
+      tool_usage_count = {},     -- Track individual tool usage
+      total_token_consumption = 0,
+      max_token_limit = 4096,    -- Configurable token limit
+      current_depth = 0,         -- Track recursion depth
+      max_recursion_depth = 3,   -- Prevent excessive nesting
+      working_directory = nil,   -- Explicitly set to nil initially
+      project_root = nil,        -- Specific project root for file access validation
+      last_known_good_directory = nil  -- Track the last valid directory
+    }
+  end,
 
   ---@brief Set the working directory and project root for execution context
   ---@param directory string The directory to set as working directory
-  set_working_directory = function(self, directory)
+  ---@param force boolean? Optional flag to force directory set even if invalid
+  set_working_directory = function(self, directory, force)
     -- Validate and sanitize the directory path
     local sanitized_dir = vim.fn.fnamemodify(directory, ":p")
 
     -- Ensure the directory exists and is a directory
     if vim.fn.isdirectory(sanitized_dir) ~= 1 then
-      error("Invalid working directory: " .. sanitized_dir)
+      if force then
+        -- If force is true, use the directory even if it doesn't exist
+        self._state.working_directory = sanitized_dir
+        self._state.project_root = sanitized_dir
+        return sanitized_dir
+      else
+        -- Try to use the last known good directory or current working directory
+        local fallback_dir = self._state.last_known_good_directory or vim.fn.getcwd()
+
+        -- Log the directory validation failure
+        print(string.format("Warning: Invalid directory '%s'. Falling back to '%s'",
+          sanitized_dir, fallback_dir))
+
+        sanitized_dir = vim.fn.fnamemodify(fallback_dir, ":p")
+      end
     end
 
+    -- Update the last known good directory
+    self._state.last_known_good_directory = sanitized_dir
     self._state.working_directory = sanitized_dir
     self._state.project_root = sanitized_dir
+
+    return sanitized_dir
   end,
 
   ---@brief Validate if a path is within the allowed project root
@@ -425,9 +459,19 @@ function M.func(input, opts)
   local tools = get_available_tools()
   local start_time = Utils.get_timestamp()
 
-  -- Set the working directory explicitly to the current project root
+  -- Reset the execution context to ensure clean state
   local context = ExecutionContext
-  context:set_working_directory(vim.fn.getcwd())
+  context:reset()
+
+  -- Explicitly set the working directory to the current directory
+  -- This ensures the agent runs in the same context as the caller
+  local current_dir = vim.fn.getcwd()
+  context:set_working_directory(current_dir, true)
+
+  -- Add additional logging to track working directory
+  if on_log then
+    on_log(string.format("Agent launched in directory: %s", current_dir))
+  end
 
   -- Validate and filter tools
   local validated_tools = {}
