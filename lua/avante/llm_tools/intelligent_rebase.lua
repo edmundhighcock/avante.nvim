@@ -387,7 +387,7 @@ function M.func(input, opts)
     -- Inner loop: Attempt to resolve conflicts up to max_attempts
     while context.current_attempt < context.max_attempts do
       -- Attempt to resolve conflicts
-      local resolution_success, resolution_err = resolve_conflicts(context)
+      local resolution_success, resolution_err = resolve_conflicts(context, opts)
 
       -- If resolution is successful
       if resolution_success then
