@@ -317,12 +317,14 @@ end
 
 ---@type AvanteLLMToolFunc<{ source_branch: string, target_branch: string, max_attempts?: integer }>
 function M.func(input, opts)
+  opts = opts or {}
   local on_log = opts.on_log
   local on_complete = opts.on_complete
 
-  if not on_complete then
-    return false, "on_complete callback is required"
-  end
+  -- Track the overall result and error state
+  local is_success = false
+  local resolution_logs = {}
+  local final_error = nil
 
   local context, init_err = initialize_rebase(
     input.source_branch,
@@ -331,41 +333,71 @@ function M.func(input, opts)
   )
 
   if init_err then
-    on_complete(false, {}, { error = init_err })
-    return
+    is_success = false
+    final_error = init_err
+    resolution_logs = {}
+    return is_success, final_error
   end
 
-  local function attempt_rebase()
+  -- Continue the rebase process with multiple conflict resolution attempts
+  while context.current_attempt < context.max_attempts do
+    -- Continue the current rebase
+    local continue_result = vim.fn.system("git rebase --continue 2>&1")
+
+    -- Detect conflicts in the current rebase state
     local has_conflicts, conflict_err = detect_conflicts(context)
 
+    -- Handle unexpected errors during conflict detection
     if conflict_err then
-      safe_rollback(context)
-      on_complete(false, context.resolution_logs, { error = conflict_err })
-      return
+      is_success = false
+      final_error = conflict_err
+      resolution_logs = context.resolution_logs
+      break
     end
 
+    -- If no conflicts, rebase is successful
     if not has_conflicts then
-      on_complete(true, context.resolution_logs, nil)
-      return
+      is_success = true
+      resolution_logs = context.resolution_logs
+      break
     end
 
+    -- Attempt to resolve conflicts
     local resolution_success, resolution_err = resolve_conflicts(context)
 
-    if resolution_success then
-      on_complete(true, context.resolution_logs, nil)
-    elseif context.current_attempt < context.max_attempts then
-      -- Retry rebase if max attempts not reached
-      attempt_rebase()
-    else
-      safe_rollback(context)
-      on_complete(false, context.resolution_logs, {
-        error = resolution_err or "Failed to resolve conflicts"
-      })
+    -- If resolution fails
+    if not resolution_success then
+      is_success = false
+      final_error = resolution_err or "Failed to resolve conflicts"
+      resolution_logs = context.resolution_logs
+
+      -- If this was the last attempt, break the loop
+      if context.current_attempt >= context.max_attempts - 1 then
+        break
+      end
     end
+
+    -- Increment attempt counter
+    context.current_attempt = context.current_attempt + 1
   end
 
-  -- Start the rebase process
-  attempt_rebase()
+  -- If rebase was not successful after all attempts, rollback
+  if not is_success then
+    safe_rollback(context)
+  end
+
+  -- If on_complete is provided, call it with the results
+  if on_complete then
+    on_complete(is_success, resolution_logs, final_error and { error = final_error } or nil)
+  end
+
+  -- If on_complete is not provided, return the results directly
+  if not on_complete then
+    if final_error then
+      return is_success, final_error
+    end
+    return is_success, nil
+  end
 end
 
 return M
