@@ -242,6 +242,8 @@ local function resolve_conflicts(context)
       prompt = string.format(
         "Analyze and resolve git merge conflict in file: %s\n" ..
         "Provide a resolution strategy that preserves code intent and minimizes changes.\n" ..
+        "Load and use tools like rag_search, web_search and git_add as required.\n" ..
+        "Prefer to use specialist tools like git_add rather than running a shell command.\n" ..
         "Include reasoning and proposed code changes.\n" ..
         "CRITICAL SAFETY INSTRUCTIONS:\n" ..
         "1. Do not modify binary files\n" ..
@@ -339,9 +341,9 @@ function M.func(input, opts)
     return is_success, final_error
   end
 
-  -- Continue the rebase process with multiple conflict resolution attempts
-  while context.current_attempt < context.max_attempts do
-    -- Continue the current rebase
+  -- Outer loop: Continue the rebase process
+  while true do
+    -- Attempt to continue the rebase
     local continue_result = vim.fn.system("git rebase --continue 2>&1")
 
     -- Detect conflicts in the current rebase state
@@ -362,23 +364,34 @@ function M.func(input, opts)
       break
     end
 
-    -- Attempt to resolve conflicts
-    local resolution_success, resolution_err = resolve_conflicts(context)
+    -- Reset attempt counter for this set of conflicts
+    context.current_attempt = 0
+    local conflicts_resolved = false
 
-    -- If resolution fails
-    if not resolution_success then
+    -- Inner loop: Attempt to resolve conflicts up to max_attempts
+    while context.current_attempt < context.max_attempts do
+      -- Attempt to resolve conflicts
+      local resolution_success, resolution_err = resolve_conflicts(context)
+
+      -- If resolution is successful
+      if resolution_success then
+        conflicts_resolved = true
+        break
+      end
+
+      -- If resolution fails
       is_success = false
       final_error = resolution_err or "Failed to resolve conflicts"
       resolution_logs = context.resolution_logs
 
-      -- If this was the last attempt, break the loop
-      if context.current_attempt >= context.max_attempts - 1 then
-        break
-      end
+      -- Increment attempt counter
+      context.current_attempt = context.current_attempt + 1
     end
 
-    -- Increment attempt counter
-    context.current_attempt = context.current_attempt + 1
+    -- If we failed to resolve conflicts in all attempts, break the outer loop
+    if not conflicts_resolved then
+      break
+    end
   end
 
   -- If rebase was not successful after all attempts, rollback
