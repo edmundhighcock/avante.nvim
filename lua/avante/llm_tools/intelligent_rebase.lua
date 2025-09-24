@@ -234,8 +234,9 @@ end
 
 ---@brief Resolve conflicts using AI-powered strategies with enhanced safety
 ---@param context IntelligentRebaseContext
+---@param opts? table Optional configuration options
 ---@return boolean, string | nil
-local function resolve_conflicts(context)
+local function resolve_conflicts(context, opts)
   context.current_attempt = context.current_attempt + 1
 
   if context.current_attempt > context.max_attempts then
