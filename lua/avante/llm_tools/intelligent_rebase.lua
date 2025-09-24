@@ -253,6 +253,22 @@ local function resolve_conflicts(context)
         "5. Maintain existing code style and formatting",
         conflict_file
       )
+    }, {
+      on_log = opts.on_log or function() end,
+      on_complete = function(result, err)
+        if err then
+          table.insert(context.resolution_logs, {
+            type = "agent_resolution_error",
+            file = conflict_file,
+            error = err,
+            timestamp = os.time()
+          })
+        end
+      end,
+      session_ctx = opts.session_ctx or {},
+      store = {
+        messages = {}
+      }
     })
 
     if agent_error then
