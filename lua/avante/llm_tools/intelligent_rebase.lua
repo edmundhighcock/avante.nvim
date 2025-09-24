@@ -140,9 +140,26 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
     return nil, string.format("Target branch '%s' does not exist", sanitized_target)
   end
 
-  -- Check for uncommitted changes with enhanced safety
-  local status_result = vim.fn.system("git status --porcelain")
-  if status_result ~= "" then
+  -- Check for non-empty tracked changes
+  local function has_non_empty_tracked_changes()
+    local status_output = vim.fn.systemlist("git status --porcelain")
+    for _, line in ipairs(status_output) do
+      -- Ignore untracked directories or files
+      if not line:match("^%?%?") then
+        -- Check if the change is not just an empty directory
+        local file = line:match("^%s*[AMDR]%s+(.+)$")
+        if file then
+          if not file:match("/$") then  -- Not an empty directory
+            return true
+          end
+        end
+      end
+    end
+    return false
+  end
+
+  -- Check for uncommitted changes, but allow empty directory changes
+  if has_non_empty_tracked_changes() then
     return nil, "Uncommitted changes exist. Please commit or stash changes before rebasing."
   end
 
