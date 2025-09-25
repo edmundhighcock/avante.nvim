@@ -498,18 +498,25 @@ function M.func(input, opts)
     resolution_logs = {}
 
         -- Convert error to string to prevent concatenation issues
-        local error_str = type(init_err) == "table" and vim.inspect(init_err) or tostring(init_err)
-        local history_message = History.Message:new("assistant",
-          "Rebase Initialization Failed: " .. error_str,
-      { just_for_display = true }
-    )
+        local error_str = "Unknown error"
+        if type(init_err) == "table" then
+          error_str = vim.inspect(init_err)
+        elseif init_err ~= nil then
+          error_str = tostring(init_err)
+        end
 
-    if on_complete then
-      on_complete(is_success, history_message)
-    end
+        local history_message = History.Message:new(
+          "assistant",
+          "Rebase Initialization Failed: " .. (error_str or "Unknown error"),
+          { just_for_display = true }
+        )
 
-    return is_success, final_error
-  end
+        if on_complete then
+          on_complete(is_success, { history_message })
+        end
+  
+        return is_success, final_error
+      end
 
   -- Add on_log callback to context for updates
   context.on_log = on_log
