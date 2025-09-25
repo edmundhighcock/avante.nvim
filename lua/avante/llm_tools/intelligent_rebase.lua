@@ -124,6 +124,33 @@ local function log_rebase_update(context, update)
       type = "rebase_update",
       data = update
     })
+
+    -- Create a history message for significant stages
+    local history_message_stages = {
+      "initializing",
+      "detecting_conflicts",
+      "resolving_conflicts",
+      "rollback"
+    }
+
+    if vim.tbl_contains(history_message_stages, update.stage) then
+      local message_content = string.format(
+        "Rebase Stage: %s\nDetails: %s\nProgress: %d%%\n%s",
+        update.stage,
+        update.details,
+        update.progress,
+        update.errors and #update.errors > 0 and "Errors: " .. table.concat(update.errors, ", ") or ""
+      )
+
+      local history_message = History.Message:new("assistant", message_content, {
+        just_for_display = true,
+        state = update.stage
+      })
+
+      if context.history_messages then
+        table.insert(context.history_messages, history_message)
+      end
+    end
   end
 end
 
@@ -468,11 +495,22 @@ function M.func(input, opts)
     is_success = false
     final_error = init_err
     resolution_logs = {}
+
+    local history_message = History.Message:new("assistant",
+      "Rebase Initialization Failed: " .. init_err,
+      { just_for_display = true }
+    )
+
+    if on_complete then
+      on_complete(is_success, history_message)
+    end
+
     return is_success, final_error
   end
 
   -- Add on_log callback to context for updates
   context.on_log = on_log
+  context.history_messages = {}
 
   -- Outer loop: Continue the rebase process
   while true do
@@ -534,7 +572,21 @@ function M.func(input, opts)
 
   -- If on_complete is provided, call it with the results
   if on_complete then
-    on_complete(is_success, resolution_logs, final_error and { error = final_error } or nil)
+    local final_history_messages = context.history_messages or {}
+
+    if final_error then
+      table.insert(final_history_messages, History.Message:new("assistant",
+        "Rebase Failed: " .. (final_error or "Unknown error"),
+        { just_for_display = true }
+      ))
+    else
+      table.insert(final_history_messages, History.Message:new("assistant",
+        "Rebase Completed Successfully",
+        { just_for_display = true }
+      ))
+    end
+
+    on_complete(is_success, final_history_messages, final_error and { error = final_error } or nil)
   end
 
   -- If on_complete is not provided, return the results directly
@@ -543,6 +595,7 @@ function M.func(input, opts)
       return is_success, final_error
     end
     return is_success, nil
+  end
   end
 end
 
