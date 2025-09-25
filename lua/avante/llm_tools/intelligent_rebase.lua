@@ -497,7 +497,7 @@ function M.func(input, opts)
     final_error = init_err
     resolution_logs = {}
 
-      local history_message = History.create_message("assistant",
+      local history_message = History.Message:new("assistant",
       "Rebase Initialization Failed: " .. init_err,
       { just_for_display = true }
     )
