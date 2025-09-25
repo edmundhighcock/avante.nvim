@@ -518,7 +518,7 @@ function M.func(input, opts)
         )
 
         if on_complete then
-          on_complete(is_success, { history_message })
+          on_complete(is_success, final_error)
         end
 
         return is_success, final_error
@@ -591,13 +591,13 @@ function M.func(input, opts)
   if on_complete then
     local final_history_messages = context.history_messages or {}
 
-          -- Ensure final_error is converted to a string
-          local error_message = "Unknown error"
-          if final_error ~= nil then
-              error_message = type(final_error) == "string" and final_error or
-                              (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
-          end
-  
+    -- Ensure final_error is converted to a string
+    local error_message = "Unknown error"
+    if final_error ~= nil then
+      error_message = type(final_error) == "string" and final_error or
+                      (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
+    end
+
     if final_error then
       table.insert(final_history_messages, History.Message:new("assistant",
                   "Rebase Failed: " .. error_message,
@@ -610,10 +610,15 @@ function M.func(input, opts)
       ))
     end
 
-          -- Safely create error table
-          local error_table = final_error and { error = error_message } or nil
-  
-          on_complete(is_success, final_history_messages, error_table)
+    -- If on_messages_add is provided, use it to add history messages
+    if on_messages_add then
+      on_messages_add(final_history_messages)
+    end
+
+    -- Safely create error table
+    local error_table = final_error and { error = error_message } or nil
+
+    on_complete(is_success, error_message)
   end
 
   -- If on_complete is not provided, return the results directly
