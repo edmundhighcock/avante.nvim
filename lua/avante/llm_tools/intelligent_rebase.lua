@@ -587,37 +587,37 @@ function M.func(input, opts)
     safe_rollback(context)
   end
 
+  local final_history_messages = context.history_messages or {}
+
+  -- Ensure final_error is converted to a string
+  local error_message = "Unknown error"
+  if final_error ~= nil then
+    error_message = type(final_error) == "string" and final_error or
+    (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
+  end
+
+  if final_error then
+    table.insert(final_history_messages, History.Message:new("assistant",
+    "Rebase Failed: " .. error_message,
+    { just_for_display = true }
+    ))
+  else
+    table.insert(final_history_messages, History.Message:new("assistant",
+    "Rebase Completed Successfully",
+    { just_for_display = true }
+  ))
+  end
+
+  -- If on_messages_add is provided, use it to add history messages
+  if on_messages_add then
+    on_messages_add(final_history_messages)
+  end
+
+  -- Safely create error table
+  local error_table = final_error and { error = error_message } or nil
+
   -- If on_complete is provided, call it with the results
   if on_complete then
-    local final_history_messages = context.history_messages or {}
-
-    -- Ensure final_error is converted to a string
-    local error_message = "Unknown error"
-    if final_error ~= nil then
-      error_message = type(final_error) == "string" and final_error or
-                      (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
-    end
-
-    if final_error then
-      table.insert(final_history_messages, History.Message:new("assistant",
-                  "Rebase Failed: " .. error_message,
-        { just_for_display = true }
-      ))
-    else
-      table.insert(final_history_messages, History.Message:new("assistant",
-        "Rebase Completed Successfully",
-        { just_for_display = true }
-      ))
-    end
-
-    -- If on_messages_add is provided, use it to add history messages
-    if on_messages_add then
-      on_messages_add(final_history_messages)
-    end
-
-    -- Safely create error table
-    local error_table = final_error and { error = error_message } or nil
-
     on_complete(is_success, error_message)
   end
 
