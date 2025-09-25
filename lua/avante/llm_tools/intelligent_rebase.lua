@@ -4,6 +4,13 @@ local Helpers = require("avante.llm_tools.helpers")
 local Base = require("avante.llm_tools.base")
 local Config = require("avante.config")
 
+---@class RebaseUpdateLog
+---@field stage string Current stage of rebase (e.g., "initializing", "detecting_conflicts", "resolving_conflicts")
+---@field details string Detailed description of current action
+---@field progress number Percentage of completion (0-100)
+---@field files string[] Files currently being processed
+---@field errors string[] Any errors encountered
+
 ---@class IntelligentRebaseContext
 ---@field source_branch string
 ---@field target_branch string
@@ -12,6 +19,7 @@ local Config = require("avante.config")
 ---@field conflict_files string[]
 ---@field resolution_logs table[]
 ---@field initial_head string
+---@field on_log? fun(update: {type: string, data: RebaseUpdateLog}): nil
 
 ---@class AvanteLLMTool
 local M = setmetatable({}, Base)
@@ -22,8 +30,10 @@ M.get_description = function()
   return [[Intelligent Git Rebase Tool: Automate and enhance git rebasing with AI-powered conflict resolution.
 
 Features:
-- Automatic conflict detection
-- Contextual conflict resolution
+- Real-time rebase stage updates
+- Detailed conflict detection and resolution logging
+- Granular progress tracking
+- AI-powered contextual conflict resolution
 - Multiple resolution attempts
 - Safety validation
 - Comprehensive logging
@@ -32,7 +42,7 @@ Key Capabilities:
 1. Detect merge conflicts during rebase
 2. Analyze code context for intelligent resolution
 3. Apply safe, context-aware conflict resolution strategies
-4. Provide detailed resolution logs
+4. Provide detailed resolution logs with stage updates
 5. Limit maximum resolution attempts to prevent infinite loops
 
 When to Use:
@@ -94,6 +104,29 @@ M.returns = {
   },
 }
 
+---@brief Log rebase update with stage, details, and progress
+---@param context IntelligentRebaseContext
+---@param update RebaseUpdateLog
+local function log_rebase_update(context, update)
+  -- Add update to context's resolution_logs
+  table.insert(context.resolution_logs, {
+    timestamp = os.time(),
+    stage = update.stage,
+    details = update.details,
+    progress = update.progress,
+    files = update.files or {},
+    errors = update.errors or {}
+  })
+
+  -- Notify via on_log callback for real-time updates
+  if context.on_log then
+    context.on_log({
+      type = "rebase_update",
+      data = update
+    })
+  end
+end
+
 ---@brief Safely sanitize branch name to prevent shell injection
 ---@param branch string
 ---@return string
@@ -107,6 +140,22 @@ end
 ---@param max_attempts? integer
 ---@return IntelligentRebaseContext | nil, string | nil
 local function initialize_rebase(source_branch, target_branch, max_attempts)
+  local context = {
+    source_branch = sanitize_branch_name(source_branch),
+    target_branch = sanitize_branch_name(target_branch),
+    current_attempt = 0,
+    max_attempts = max_attempts or 3,
+    conflict_files = {},
+    resolution_logs = {},
+    initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", "")
+  }
+
+  log_rebase_update(context, {
+    stage = "initializing",
+    details = string.format("Preparing to rebase %s onto %s", context.source_branch, context.target_branch),
+    progress = 10,
+  })
+
   -- Validate input parameters
   if not source_branch or type(source_branch) ~= "string" or source_branch:match("^%s*$") then
     return nil, "Invalid source branch name. Must be a non-empty string."
@@ -117,7 +166,6 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
   end
 
   -- Validate max attempts
-  max_attempts = max_attempts or 3
   if type(max_attempts) ~= "number" or max_attempts < 1 or max_attempts > 10 then
     return nil, "Invalid max_attempts. Must be a number between 1 and 10."
   end
@@ -129,15 +177,12 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
     return vim.v.shell_error == 0
   end
 
-  local sanitized_source = sanitize_branch_name(source_branch)
-  local sanitized_target = sanitize_branch_name(target_branch)
-
-  if not branch_exists(sanitized_source) then
-    return nil, string.format("Source branch '%s' does not exist", sanitized_source)
+  if not branch_exists(context.source_branch) then
+    return nil, string.format("Source branch '%s' does not exist", context.source_branch)
   end
 
-  if not branch_exists(sanitized_target) then
-    return nil, string.format("Target branch '%s' does not exist", sanitized_target)
+  if not branch_exists(context.target_branch) then
+    return nil, string.format("Target branch '%s' does not exist", context.target_branch)
   end
 
   -- Check for non-empty tracked changes
@@ -169,15 +214,13 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
     return nil, "Not inside a git repository or repository is corrupted."
   end
 
-  return {
-    source_branch = sanitized_source,
-    target_branch = sanitized_target,
-    current_attempt = 0,
-    max_attempts = max_attempts,
-    conflict_files = {},
-    resolution_logs = {},
-    initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", "") -- Track initial HEAD for potential rollback
-  }, nil
+  log_rebase_update(context, {
+    stage = "initializing",
+    details = "Rebase context successfully initialized",
+    progress = 25,
+  })
+
+  return context, nil
 end
 
 ---@brief Safely check if a file is binary
@@ -192,6 +235,12 @@ end
 ---@param context IntelligentRebaseContext
 ---@return boolean, string | nil
 local function detect_conflicts(context)
+  log_rebase_update(context, {
+    stage = "detecting_conflicts",
+    details = "Scanning repository for merge conflicts",
+    progress = 50,
+  })
+
   -- Start the rebase process with enhanced error handling
   local rebase_result = vim.fn.system(string.format("git rebase %s %s 2>&1",
     context.target_branch,
@@ -216,18 +265,31 @@ local function detect_conflicts(context)
 
     if #safe_conflict_files > 0 then
       context.conflict_files = safe_conflict_files
-      table.insert(context.resolution_logs, {
-        type = "conflict_detected",
-        files = safe_conflict_files,
-        timestamp = os.time(),
-        raw_rebase_output = rebase_result
+
+      log_rebase_update(context, {
+        stage = "detecting_conflicts",
+        details = string.format("Found %d conflict(s)", #safe_conflict_files),
+        progress = 75,
+        files = safe_conflict_files
       })
 
       return true, nil
     else
+      log_rebase_update(context, {
+        stage = "detecting_conflicts",
+        details = "Rebase failed without clear conflict information",
+        progress = 100,
+        errors = { rebase_result }
+      })
       return false, "Rebase failed without clear conflict information: " .. rebase_result
     end
   end
+
+  log_rebase_update(context, {
+    stage = "detecting_conflicts",
+    details = "No conflicts detected",
+    progress = 100
+  })
 
   return false, nil
 end
@@ -239,13 +301,33 @@ end
 local function resolve_conflicts(context, opts)
   context.current_attempt = context.current_attempt + 1
 
+  log_rebase_update(context, {
+    stage = "resolving_conflicts",
+    details = string.format("Attempting to resolve conflicts (Attempt %d/%d)", context.current_attempt, context.max_attempts),
+    progress = 25,
+    files = context.conflict_files
+  })
+
   if context.current_attempt > context.max_attempts then
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = "Maximum resolution attempts exceeded",
+      progress = 100,
+      errors = { "Could not resolve conflicts after maximum attempts" }
+    })
     return false, "Maximum resolution attempts exceeded"
   end
 
   local resolution_errors = {}
 
   for _, conflict_file in ipairs(context.conflict_files) do
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = string.format("Analyzing conflict in file: %s", conflict_file),
+      progress = 50,
+      files = { conflict_file }
+    })
+
     -- Validate file before attempting resolution
     if not vim.fn.filereadable(conflict_file) then
       table.insert(resolution_errors, {
@@ -275,11 +357,11 @@ local function resolve_conflicts(context, opts)
       on_log = opts.on_log or function() end,
       on_complete = function(result, err)
         if err then
-          table.insert(context.resolution_logs, {
-            type = "agent_resolution_error",
-            file = conflict_file,
-            error = err,
-            timestamp = os.time()
+          log_rebase_update(context, {
+            stage = "resolving_conflicts",
+            details = string.format("Agent resolution failed for file: %s", conflict_file),
+            progress = 75,
+            errors = { err }
           })
         end
       end,
@@ -310,10 +392,11 @@ local function resolve_conflicts(context, opts)
   end
 
   if #resolution_errors > 0 then
-    table.insert(context.resolution_logs, {
-      type = "partial_resolution_failure",
-      errors = resolution_errors,
-      timestamp = os.time()
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = string.format("Partial resolution failure (%d errors)", #resolution_errors),
+      progress = 90,
+      errors = vim.tbl_map(function(err) return err.error end, resolution_errors)
     })
     return false, "Some conflicts could not be resolved automatically"
   end
@@ -322,13 +405,19 @@ local function resolve_conflicts(context, opts)
   local continue_result = vim.fn.system("git rebase --continue")
 
   if vim.v.shell_error ~= 0 then
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = "Failed to continue rebase",
+      progress = 100,
+      errors = { continue_result }
+    })
     return false, "Failed to continue rebase: " .. continue_result
   end
 
-  table.insert(context.resolution_logs, {
-    type = "conflicts_resolved",
-    attempt = context.current_attempt,
-    timestamp = os.time()
+  log_rebase_update(context, {
+    stage = "resolving_conflicts",
+    details = string.format("Successfully resolved conflicts (Attempt %d)", context.current_attempt),
+    progress = 100
   })
 
   return true, nil
@@ -338,14 +427,21 @@ end
 ---@param context IntelligentRebaseContext
 ---@return boolean
 local function safe_rollback(context)
+  log_rebase_update(context, {
+    stage = "rollback",
+    details = "Reverting changes due to unresolvable conflicts",
+    progress = 25,
+    errors = {"Rebase failed, rolling back to initial state"}
+  })
+
   -- Reset to the initial HEAD to undo any partial rebase
   local reset_result = vim.fn.system(string.format("git reset --hard %q", context.initial_head))
 
-  table.insert(context.resolution_logs, {
-    type = "rollback",
-    initial_head = context.initial_head,
-    timestamp = os.time(),
-    success = vim.v.shell_error == 0
+  log_rebase_update(context, {
+    stage = "rollback",
+    details = "Rebase rollback completed",
+    progress = 100,
+    errors = reset_result:match("fatal:") and { reset_result } or nil
   })
 
   return vim.v.shell_error == 0
@@ -374,6 +470,9 @@ function M.func(input, opts)
     resolution_logs = {}
     return is_success, final_error
   end
+
+  -- Add on_log callback to context for updates
+  context.on_log = on_log
 
   -- Outer loop: Continue the rebase process
   while true do
