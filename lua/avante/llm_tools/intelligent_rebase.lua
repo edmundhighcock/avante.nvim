@@ -3,6 +3,7 @@ local Utils = require("avante.utils")
 local Helpers = require("avante.llm_tools.helpers")
 local Base = require("avante.llm_tools.base")
 local Config = require("avante.config")
+local History = require("avante.history")
 
 ---@class RebaseUpdateLog
 ---@field stage string Current stage of rebase (e.g., "initializing", "detecting_conflicts", "resolving_conflicts")
@@ -142,7 +143,7 @@ local function log_rebase_update(context, update)
         update.errors and #update.errors > 0 and "Errors: " .. table.concat(update.errors, ", ") or ""
       )
 
-      local history_message = History.Message:new("assistant", message_content, {
+      local history_message = History.create_message(\"assistant\", message_content, {
         just_for_display = true,
         state = update.stage
       })
@@ -496,7 +497,7 @@ function M.func(input, opts)
     final_error = init_err
     resolution_logs = {}
 
-    local history_message = History.Message:new("assistant",
+      local history_message = History.create_message("assistant",
       "Rebase Initialization Failed: " .. init_err,
       { just_for_display = true }
     )
