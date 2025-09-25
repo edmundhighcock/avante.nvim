@@ -596,7 +596,6 @@ function M.func(input, opts)
     end
     return is_success, nil
   end
-  end
 end
 
 return M
