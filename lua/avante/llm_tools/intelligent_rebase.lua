@@ -511,10 +511,8 @@ function M.func(input, opts)
           error_str = tostring(init_err)
         end
 
-        local history_message = History.Message:new(
-          "assistant",
-          "Rebase Initialization Failed: " .. (error_str or "Unknown error"),
-          { just_for_display = true }
+        local history_message = History.new_assistant_synthetic(
+          "Rebase Initialization Failed: " .. (error_str or "Unknown error")
         )
 
         if on_complete then
