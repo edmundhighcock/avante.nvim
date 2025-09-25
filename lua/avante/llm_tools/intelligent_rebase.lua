@@ -497,8 +497,10 @@ function M.func(input, opts)
     final_error = init_err
     resolution_logs = {}
 
-      local history_message = History.Message:new("assistant",
-      "Rebase Initialization Failed: " .. init_err,
+        -- Convert error to string to prevent concatenation issues
+        local error_str = type(init_err) == "table" and vim.inspect(init_err) or tostring(init_err)
+        local history_message = History.Message:new("assistant",
+          "Rebase Initialization Failed: " .. error_str,
       { just_for_display = true }
     )
 
