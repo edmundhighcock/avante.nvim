@@ -1375,7 +1375,8 @@ function M.process_tool_use(tools, tool_use, opts)
     end
 
     if err ~= nil then
-      if on_log then on_log(tool_use.id, tool_use.name, "Error: " .. err, "failed") end
+        local err_str = type(err) == "string" and err or vim.inspect(err)
+        if on_log then on_log(tool_use.id, tool_use.name, "Error: " .. err_str, "failed") end
     else
       if on_log then on_log(tool_use.id, tool_use.name, "tool finished", "succeeded") end
     end
