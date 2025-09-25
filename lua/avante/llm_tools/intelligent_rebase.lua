@@ -143,7 +143,7 @@ local function log_rebase_update(context, update)
         update.errors and #update.errors > 0 and "Errors: " .. table.concat(update.errors, ", ") or ""
       )
 
-      local history_message = History.create_message(\"assistant\", message_content, {
+      local history_message = History.create_message("assistant", message_content, {
         just_for_display = true,
         state = update.stage
       })
