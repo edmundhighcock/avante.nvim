@@ -151,6 +151,11 @@ local function log_rebase_update(context, update)
       if context.history_messages then
         table.insert(context.history_messages, history_message)
       end
+
+      -- Support on_messages_add callback for incremental history updates
+      if context.on_messages_add then
+        context.on_messages_add({ history_message })
+      end
     end
   end
 end
@@ -480,6 +485,7 @@ function M.func(input, opts)
   opts = opts or {}
   local on_log = opts.on_log
   local on_complete = opts.on_complete
+  local on_messages_add = opts.on_messages_add
 
   -- Track the overall result and error state
   local is_success = false
@@ -514,12 +520,13 @@ function M.func(input, opts)
         if on_complete then
           on_complete(is_success, { history_message })
         end
-  
+
         return is_success, final_error
       end
 
-  -- Add on_log callback to context for updates
+  -- Add on_log and on_messages_add callbacks to context for updates
   context.on_log = on_log
+  context.on_messages_add = on_messages_add
   context.history_messages = {}
 
   -- Outer loop: Continue the rebase process
