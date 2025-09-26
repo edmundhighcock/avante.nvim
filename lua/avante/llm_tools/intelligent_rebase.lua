@@ -417,6 +417,159 @@ local function detect_conflicts(context)
   return false, nil
 end
 
+---@brief Verify a conflict resolution using a verification agent
+---@param conflict_file string Path to the resolved file
+---@param context IntelligentRebaseContext
+---@param opts table Optional configuration options
+---@param verification_callback fun(is_valid: boolean, issues: table|nil): nil Callback to be called when verification is complete
+local function verify_conflict_resolution(conflict_file, context, opts, verification_callback)
+  if not vim.fn.filereadable(conflict_file) then
+    return verification_callback(false, {"File is not readable"})
+  end
+
+  -- Track this operation as a pending asynchronous operation
+  track_operation(context)
+
+  log_rebase_update(context, {
+    stage = "verifying_resolution",
+    details = string.format("Verifying conflict resolution quality for file: %s", conflict_file),
+    progress = 60,
+    files = { conflict_file }
+  })
+
+  -- Read the file content to be verified
+  local file_content = vim.fn.readfile(conflict_file)
+  local file_content_str = table.concat(file_content, "\n")
+
+  -- Use a separate verification agent to verify the resolution
+  require("avante.llm_tools.dispatch_full_agent").func({
+    prompt = string.format(
+      "# Conflict Resolution Verification Task\n\n" ..
+      "## File Information\n" ..
+      "- File path: %s\n" ..
+      "- This file was recently resolved from a git merge conflict\n" ..
+      "- Your task is to verify the quality of the resolution\n\n" ..
+      "## Resolved File Content\n\n```\n%s\n```\n\n" ..
+      "## VERIFICATION REQUIREMENTS\n\n" ..
+      "1. **Check for conflict markers**:\n" ..
+      "   - Look for ANY remaining conflict markers: `<<<<<<<`, `=======`, or `>>>>>>>`\n" ..
+      "   - A single remaining marker = FAILED verification\n\n" ..
+      "2. **Check for duplicate code**:\n" ..
+      "   - Look for any duplicated functions, methods, or classes\n" ..
+      "   - Look for repeated blocks of code (3+ similar lines)\n" ..
+      "   - Any significant duplication = FAILED verification\n\n" ..
+      "3. **Check for logical consistency**:\n" ..
+      "   - Ensure the code appears to be syntactically valid\n" ..
+      "   - Check that variable names and function calls are consistent\n\n" ..
+      "## VERIFICATION RESPONSE FORMAT\n\n" ..
+      "Respond with a JSON object containing:\n" ..
+      "```json\n" ..
+      "{\n" ..
+      "  \"passed\": true|false,\n" ..
+      "  \"issues\": [\"list\", \"of\", \"issues\", \"found\"]\n" ..
+      "}\n" ..
+      "```\n\n" ..
+      "## EXAMPLES\n\n" ..
+      "### Example 1: Failed verification (conflict markers)\n" ..
+      "```json\n" ..
+      "{\n" ..
+      "  \"passed\": false,\n" ..
+      "  \"issues\": [\"Conflict marker '<<<<<<<' found at line 45\"]\n" ..
+      "}\n" ..
+      "```\n\n" ..
+      "### Example 2: Failed verification (duplicate code)\n" ..
+      "```json\n" ..
+      "{\n" ..
+      "  \"passed\": false,\n" ..
+      "  \"issues\": [\"Duplicate function 'processData' found at lines 123 and 156\"]\n" ..
+      "}\n" ..
+      "```\n\n" ..
+      "### Example 3: Successful verification\n" ..
+      "```json\n" ..
+      "{\n" ..
+      "  \"passed\": true,\n" ..
+      "  \"issues\": []\n" ..
+      "}\n" ..
+      "```\n\n" ..
+      "BE EXTREMELY THOROUGH in your verification. Missing a conflict marker or duplicate code is a critical failure.\n",
+      conflict_file,
+      file_content_str:sub(1, 8000) -- Limit size to avoid token issues
+    )
+  }, {
+    on_log = opts.on_log or function() end,
+    on_complete = function(result, err)
+      if err then
+        log_rebase_update(context, {
+          stage = "verifying_resolution",
+          details = string.format("Verification agent failed for file: %s", conflict_file),
+          progress = 65,
+          errors = { err }
+        })
+
+        -- Complete this operation and decrement the pending operations counter
+        complete_operation(context, nil, false, err)
+
+        -- Return verification failure due to agent error
+        return verification_callback(false, {"Verification agent failed: " .. err})
+      end
+
+      -- Parse the verification result
+      local verification_result = nil
+      local parse_success, parse_error = pcall(function()
+        -- Extract JSON from the result
+        local json_str = result:match("```json%s*(.-)%s*```") or
+                         result:match("{%s*\"passed\".-}") or
+                         result
+
+        -- Parse the JSON
+        verification_result = vim.fn.json_decode(json_str)
+      end)
+
+      if not parse_success or not verification_result or type(verification_result) ~= "table" or
+         verification_result.passed == nil then
+        log_rebase_update(context, {
+          stage = "verifying_resolution",
+          details = "Failed to parse verification result",
+          progress = 65,
+          errors = { "Invalid verification result format" }
+        })
+
+        -- Complete this operation
+        complete_operation(context, nil, false, "Invalid verification result format")
+
+        -- Return verification failure due to parsing error
+        return verification_callback(false, {"Failed to parse verification result"})
+      end
+
+      -- Log verification result
+      if verification_result.passed then
+        log_rebase_update(context, {
+          stage = "verifying_resolution",
+          details = string.format("Verification passed for file: %s", conflict_file),
+          progress = 70
+        })
+      else
+        log_rebase_update(context, {
+          stage = "verifying_resolution",
+          details = string.format("Verification failed for file: %s", conflict_file),
+          progress = 70,
+          errors = verification_result.issues or {"Unknown verification issues"}
+        })
+      end
+
+      -- Complete this operation
+      complete_operation(context, nil, verification_result.passed, verification_result.passed and nil or "Verification failed")
+
+      -- Return verification result
+      return verification_callback(verification_result.passed, verification_result.issues)
+    end,
+    session_ctx = opts.session_ctx or {},
+    store = {
+      messages = {}
+    }
+  })
+end
+
 ---@brief Resolve conflicts using AI-powered strategies with enhanced safety
 ---@param context IntelligentRebaseContext
 ---@param opts? table Optional configuration options
@@ -704,17 +857,17 @@ local function resolve_conflicts(context, opts, callback)
             error = err
           })
         else
-          -- Log staging attempt
+          -- Log resolution completion
           log_rebase_update(context, {
             stage = "resolving_conflicts",
-            details = string.format("Staging resolved file: %s", conflict_file),
-            progress = 80,
+            details = string.format("Resolution completed for file: %s, verifying quality", conflict_file),
+            progress = 75,
             files = { conflict_file }
           })
 
-          -- Verify file exists before staging
+          -- Verify file exists before verification
           if vim.fn.filereadable(conflict_file) ~= 1 then
-            local error_msg = string.format("Cannot stage file: %s does not exist or is not readable", conflict_file)
+            local error_msg = string.format("Cannot verify file: %s does not exist or is not readable", conflict_file)
             table.insert(resolution_errors, {
               file = conflict_file,
               error = error_msg
@@ -722,32 +875,105 @@ local function resolve_conflicts(context, opts, callback)
 
             log_rebase_update(context, {
               stage = "resolving_conflicts",
-              details = "Staging failed - file not readable",
-              progress = 85,
+              details = "Verification failed - file not readable",
+              progress = 80,
               errors = { error_msg }
             })
-          else
-            -- Verify no conflict markers remain
-            local file_content = vim.fn.readfile(conflict_file)
-            local file_content_str = table.concat(file_content, "\n")
 
-            if file_content_str:match("<<<<<<< HEAD") or
-               file_content_str:match("=======") or
-               file_content_str:match(">>>>>>>") then
+            -- Complete this operation and move to next file
+            complete_operation(context, nil, false, error_msg)
+            return process_next_conflict(index + 1)
+          end
 
-              local error_msg = "Conflict markers still present in resolved file"
+          -- Use the verification agent to verify the resolution quality
+          verify_conflict_resolution(conflict_file, context, opts, function(is_valid, issues)
+            if not is_valid then
+              -- Resolution verification failed - create a more detailed error message
+              local conflict_markers_found = false
+              local duplicate_code_found = false
+              local other_issues = {}
+
+              -- Categorize issues for better reporting
+              if issues then
+                for _, issue in ipairs(issues) do
+                  if issue:match("conflict marker") or issue:match("<<<<<<<") or issue:match("=======") or issue:match(">>>>>>>") then
+                    conflict_markers_found = true
+                  elseif issue:match("duplicate") or issue:match("repeated") then
+                    duplicate_code_found = true
+                  else
+                    table.insert(other_issues, issue)
+                  end
+                end
+              end
+
+              -- Create a detailed error message based on issue categories
+              local error_details = {}
+              if conflict_markers_found then
+                table.insert(error_details, "Conflict markers still present in file")
+              end
+              if duplicate_code_found then
+                table.insert(error_details, "Duplicate code found in resolution")
+              end
+              if #other_issues > 0 then
+                table.insert(error_details, "Other issues: " .. table.concat(other_issues, "; "))
+              end
+
+              local error_msg = "Resolution verification failed: " .. table.concat(error_details, ". ")
+
+              -- Log the detailed error
               table.insert(resolution_errors, {
                 file = conflict_file,
-                error = error_msg
+                error = error_msg,
+                issues = issues -- Store original issues for potential retry
               })
 
+              -- Update with categorized errors for better user feedback
               log_rebase_update(context, {
                 stage = "resolving_conflicts",
-                details = "Staging failed - conflict markers remain",
-                progress = 85,
-                errors = { error_msg }
+                details = "Resolution verification failed - " ..
+                          (conflict_markers_found and "conflict markers remain" or
+                           duplicate_code_found and "duplicate code detected" or
+                           "see issues for details"),
+                progress = 80,
+                errors = issues or {"Unknown verification issues"}
               })
+
+              -- If we still have attempts left, try again with the same file
+              if context.current_attempt < context.max_attempts then
+                log_rebase_update(context, {
+                  stage = "resolving_conflicts",
+                  details = string.format("Retrying resolution for file: %s (failed verification)", conflict_file),
+                  progress = 80,
+                  errors = issues or {"Unknown verification issues"}
+                })
+
+                -- Complete this operation but don't move to next file yet
+                complete_operation(context, nil, false, error_msg)
+
+                -- Process the same file again (don't increment index)
+                return process_next_conflict(index)
+              else
+                -- Max attempts reached for this file, log and move on
+                log_rebase_update(context, {
+                  stage = "resolving_conflicts",
+                  details = string.format("Maximum resolution attempts reached for file: %s", conflict_file),
+                  progress = 80,
+                  errors = {"Failed to resolve after maximum attempts"}
+                })
+
+                -- Complete this operation and move to next file
+                complete_operation(context, nil, false, error_msg)
+                return process_next_conflict(index + 1)
+              end
             else
+              -- Verification passed, proceed with staging
+              log_rebase_update(context, {
+                stage = "resolving_conflicts",
+                details = string.format("Verification passed, staging file: %s", conflict_file),
+                progress = 80,
+                files = { conflict_file }
+              })
+
               -- Apply the resolution with safety checks
               local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
 
@@ -784,14 +1010,21 @@ local function resolve_conflicts(context, opts, callback)
                 else
                   log_rebase_update(context, {
                     stage = "resolving_conflicts",
-                    details = string.format("Successfully staged resolved file: %s", conflict_file),
+                    details = string.format("Successfully verified and staged resolved file: %s", conflict_file),
                     progress = 85,
                     files = { conflict_file }
                   })
                 end
               end
+
+              -- Complete this operation and move to next file
+              complete_operation(context, nil, true, nil)
+              return process_next_conflict(index + 1)
             end
-          end
+          })
+
+          -- Don't proceed to the next file yet - the verification callback will handle that
+          return
         end
 
         -- Complete this operation and decrement the pending operations counter
