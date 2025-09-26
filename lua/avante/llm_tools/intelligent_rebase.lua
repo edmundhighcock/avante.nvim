@@ -676,6 +676,7 @@ local function resolve_conflicts(context, opts, callback)
         "- Use ONLY the replace_in_file tool for making changes\n" ..
         "- Use the view tool to verify your changes\n" ..
         "- DO NOT invoke any interactive tools or editors\n\n" ..
+        "- LOAD AND USE the rag_search tool if you need to understand the codebase.\n\n" ..
         "## FINAL CHECKLIST\n\n" ..
         "Before completing the task, verify:\n" ..
         "1. [ ] ALL conflict markers are completely removed\n" ..
