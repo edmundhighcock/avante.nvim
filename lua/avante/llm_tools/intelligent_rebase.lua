@@ -695,7 +695,7 @@ function M.func(input, opts)
 
         -- Mark as completed to prevent further operations
         context.has_completed = true
-    
+
       -- Complete with error
       pcall(function()
         on_complete(is_success, error_str)
@@ -711,9 +711,86 @@ function M.func(input, opts)
   context.on_state_change = on_state_change
   context.history_messages = {}
 
+  -- Store the main completion callback in the context
+  context.main_complete_callback = on_complete
+
   -- Set GIT_EDITOR to prevent interactive editor sessions for all Git commands
   local old_git_editor = vim.fn.getenv("GIT_EDITOR")
   vim.fn.setenv("GIT_EDITOR", ":")
+
+  -- Define a function to handle final cleanup and completion
+  local function finalize_rebase(success, error)
+    -- Only execute if we haven't already completed
+    if context.has_completed then return end
+
+    -- Mark as completed to prevent further calls
+    context.has_completed = true
+
+    -- Set the final results
+    is_success = success
+    final_error = error
+    resolution_logs = context.resolution_logs
+
+    -- If rebase was not successful, rollback
+    if not is_success then
+      safe_rollback(context)
+    end
+
+    -- Restore original GIT_EDITOR environment variable
+    if old_git_editor ~= "" then
+      vim.fn.setenv("GIT_EDITOR", old_git_editor)
+    else
+      vim.fn.unsetenv("GIT_EDITOR")
+    end
+
+    local final_history_messages = context.history_messages or {}
+
+    -- Ensure final_error is converted to a string
+    local error_message = "Unknown error"
+    if final_error ~= nil then
+      error_message = type(final_error) == "string" and final_error or
+      (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
+    end
+
+    -- Update final state
+    local final_state = is_success and "succeeded" or "failed"
+    if on_state_change then
+      pcall(on_state_change, final_state)
+    end
+
+    -- Create final status message with appropriate state
+    local final_message
+    if final_error then
+      final_message = History.Message:new("assistant",
+        "Rebase Failed: " .. error_message,
+        { just_for_display = true, state = "failed" }
+      )
+    else
+      final_message = History.Message:new("assistant",
+        "Rebase Completed Successfully",
+        { just_for_display = true, state = "succeeded" }
+      )
+    end
+
+    -- Add final message to history messages
+    table.insert(final_history_messages, final_message)
+
+    -- If on_messages_add is provided, use it to add history messages
+    if on_messages_add then
+      -- Use pcall to handle potential errors
+      pcall(function()
+        on_messages_add(final_history_messages)
+      end)
+    end
+
+    -- Call the original on_complete with the results
+    pcall(function()
+      context.main_complete_callback(is_success, final_error and error_message or nil)
+    end)
+  end
+
+  -- Store the finalize function in the context
+  context.finalize_rebase = finalize_rebase
 
   -- Define a function to handle the rebase process
   local function continue_rebase_process()
@@ -725,26 +802,13 @@ function M.func(input, opts)
 
     -- Handle unexpected errors during conflict detection
     if conflict_err then
-      is_success = false
-      final_error = conflict_err
-      resolution_logs = context.resolution_logs
-
-      -- Complete with failure
-      if on_complete then
-        on_complete(is_success, final_error)
-      end
+      context.finalize_rebase(false, conflict_err)
       return
     end
 
     -- If no conflicts, rebase is successful
     if not has_conflicts then
-      is_success = true
-      resolution_logs = context.resolution_logs
-
-      -- Complete with success
-      if on_complete then
-        on_complete(is_success, nil)
-      end
+      context.finalize_rebase(true, nil)
       return
     end
 
@@ -759,17 +823,10 @@ function M.func(input, opts)
           -- If resolution was successful, continue the rebase process
           continue_rebase_process()
         else
-          -- Update failure state
-          is_success = false
-          final_error = resolution_err or "Failed to resolve conflicts"
-          resolution_logs = context.resolution_logs
-
           -- Check if we've reached max attempts
           if context.current_attempt >= context.max_attempts then
             -- Report completion with failure
-            if on_complete then
-              on_complete(is_success, final_error)
-            end
+            context.finalize_rebase(false, resolution_err or "Failed to resolve conflicts")
           else
             -- Try again with the next attempt
             -- resolve_conflicts will increment the attempt counter
@@ -786,65 +843,8 @@ function M.func(input, opts)
   -- Start the rebase process
   continue_rebase_process()
 
-  -- If rebase was not successful after all attempts, rollback
-  if not is_success then
-    safe_rollback(context)
-  end
-
-  -- Restore original GIT_EDITOR environment variable
-  if old_git_editor ~= "" then
-    vim.fn.setenv("GIT_EDITOR", old_git_editor)
-  else
-    vim.fn.unsetenv("GIT_EDITOR")
-  end
-
-  local final_history_messages = context.history_messages or {}
-
-  -- Ensure final_error is converted to a string
-  local error_message = "Unknown error"
-  if final_error ~= nil then
-    error_message = type(final_error) == "string" and final_error or
-    (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
-  end
-
-  -- Update final state
-  local final_state = is_success and "succeeded" or "failed"
-  if on_state_change then
-    pcall(on_state_change, final_state)
-  end
-
-  -- Create final status message with appropriate state
-  local final_message
-  if final_error then
-    final_message = History.Message:new("assistant",
-      "Rebase Failed: " .. error_message,
-      { just_for_display = true, state = "failed" }
-    )
-  else
-    final_message = History.Message:new("assistant",
-      "Rebase Completed Successfully",
-      { just_for_display = true, state = "succeeded" }
-    )
-  end
-
-  -- Add final message to history messages
-  table.insert(final_history_messages, final_message)
-
-  -- If on_messages_add is provided, use it to add history messages
-  if on_messages_add then
-    -- Use pcall to handle potential errors
-    pcall(function()
-      on_messages_add(final_history_messages)
-    end)
-  end
-
-  -- Always call on_complete with the results
-  -- on_complete is guaranteed to be a function (either provided or our default no-op)
-  pcall(function()
-    on_complete(is_success, final_error and error_message or nil)
-  end)
-
   -- No direct return values - fully asynchronous pattern
+  -- All completion handling is done through callbacks
 end
 
 return M
