@@ -359,8 +359,8 @@ end
 ---@brief Resolve conflicts using AI-powered strategies with enhanced safety
 ---@param context IntelligentRebaseContext
 ---@param opts? table Optional configuration options
----@return boolean, string | nil
-local function resolve_conflicts(context, opts)
+---@param callback fun(success: boolean, error: string | nil): nil Callback to be called when all conflicts are resolved
+local function resolve_conflicts(context, opts, callback)
   context.current_attempt = context.current_attempt + 1
 
   log_rebase_update(context, {
@@ -377,12 +377,62 @@ local function resolve_conflicts(context, opts)
       progress = 100,
       errors = { "Could not resolve conflicts after maximum attempts" }
     })
-    return false, "Maximum resolution attempts exceeded"
+    return callback(false, "Maximum resolution attempts exceeded")
   end
 
   local resolution_errors = {}
 
-  for _, conflict_file in ipairs(context.conflict_files) do
+  -- Process conflict files sequentially
+  local function process_next_conflict(index)
+    -- Check if we've processed all conflicts
+    if index > #context.conflict_files then
+      -- All conflicts processed, check for errors
+      if #resolution_errors > 0 then
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = string.format("Partial resolution failure (%d errors)", #resolution_errors),
+          progress = 90,
+          errors = vim.tbl_map(function(err) return err.error end, resolution_errors)
+        })
+        return callback(false, "Some conflicts could not be resolved automatically")
+      end
+
+      -- Set GIT_EDITOR to prevent interactive editor sessions
+      local old_git_editor = vim.fn.getenv("GIT_EDITOR")
+      vim.fn.setenv("GIT_EDITOR", ":")
+
+      -- Continue the rebase with error handling
+      local continue_result = vim.fn.system("git rebase --continue 2>&1")
+
+      -- Restore original GIT_EDITOR
+      if old_git_editor ~= "" then
+        vim.fn.setenv("GIT_EDITOR", old_git_editor)
+      else
+        vim.fn.unsetenv("GIT_EDITOR")
+      end
+
+      if vim.v.shell_error ~= 0 then
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = "Failed to continue rebase",
+          progress = 100,
+          errors = { continue_result }
+        })
+        return callback(false, "Failed to continue rebase: " .. continue_result)
+      end
+
+      log_rebase_update(context, {
+        stage = "resolving_conflicts",
+        details = string.format("Successfully resolved conflicts (Attempt %d)", context.current_attempt),
+        progress = 100
+      })
+
+      return callback(true, nil)
+    end
+
+    -- Get the current conflict file to process
+    local conflict_file = context.conflict_files[index]
+
     log_rebase_update(context, {
       stage = "resolving_conflicts",
       details = string.format("Analyzing conflict in file: %s", conflict_file),
@@ -396,7 +446,8 @@ local function resolve_conflicts(context, opts)
         file = conflict_file,
         error = "File is not readable"
       })
-      goto continue
+      -- Process the next conflict file
+      return process_next_conflict(index + 1)
     end
 
     -- Read the conflict file content
@@ -413,11 +464,12 @@ local function resolve_conflicts(context, opts)
           error = "Failed to stage file without conflict markers: " .. stage_result
         })
       end
-      goto continue
+      -- Process the next conflict file
+      return process_next_conflict(index + 1)
     end
 
     -- Use dispatch_full_agent to analyze and resolve conflicts
-    local agent_result, agent_error = require("avante.llm_tools.dispatch_full_agent").func({
+    require("avante.llm_tools.dispatch_full_agent").func({
       prompt = string.format(
         "Analyze and resolve git merge conflict in file: %s\n" ..
         "File content with conflict markers is shown below:\n\n%s\n\n" ..
@@ -446,75 +498,38 @@ local function resolve_conflicts(context, opts)
             progress = 75,
             errors = { err }
           })
+
+          table.insert(resolution_errors, {
+            file = conflict_file,
+            error = err
+          })
+        else
+          -- Apply the resolution with safety checks
+          local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
+
+          if vim.v.shell_error ~= 0 then
+            table.insert(resolution_errors, {
+              file = conflict_file,
+              error = "Failed to stage resolved file: " .. apply_result
+            })
+          end
         end
+
+        -- Process the next conflict file
+        process_next_conflict(index + 1)
       end,
       session_ctx = opts.session_ctx or {},
       store = {
         messages = {}
       }
     })
-
-    if agent_error then
-      table.insert(resolution_errors, {
-        file = conflict_file,
-        error = agent_error
-      })
-    else
-      -- Apply the resolution with safety checks
-      local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
-
-      if vim.v.shell_error ~= 0 then
-        table.insert(resolution_errors, {
-          file = conflict_file,
-          error = "Failed to stage resolved file: " .. apply_result
-        })
-      end
-    end
-
-    ::continue::
   end
 
-  if #resolution_errors > 0 then
-    log_rebase_update(context, {
-      stage = "resolving_conflicts",
-      details = string.format("Partial resolution failure (%d errors)", #resolution_errors),
-      progress = 90,
-      errors = vim.tbl_map(function(err) return err.error end, resolution_errors)
-    })
-    return false, "Some conflicts could not be resolved automatically"
-  end
+  -- Start processing the first conflict file
+  process_next_conflict(1)
 
-  -- Set GIT_EDITOR to prevent interactive editor sessions
-  local old_git_editor = vim.fn.getenv("GIT_EDITOR")
-  vim.fn.setenv("GIT_EDITOR", ":")
-
-  -- Continue the rebase with error handling
-  local continue_result = vim.fn.system("git rebase --continue 2>&1")
-
-  -- Restore original GIT_EDITOR
-  if old_git_editor ~= "" then
-    vim.fn.setenv("GIT_EDITOR", old_git_editor)
-  else
-    vim.fn.unsetenv("GIT_EDITOR")
-  end
-
-  if vim.v.shell_error ~= 0 then
-    log_rebase_update(context, {
-      stage = "resolving_conflicts",
-      details = "Failed to continue rebase",
-      progress = 100,
-      errors = { continue_result }
-    })
-    return false, "Failed to continue rebase: " .. continue_result
-  end
-
-  log_rebase_update(context, {
-    stage = "resolving_conflicts",
-    details = string.format("Successfully resolved conflicts (Attempt %d)", context.current_attempt),
-    progress = 100
-  })
-
-  return true, nil
+  -- The function now uses callbacks, so we don't need this synchronous return.
+  -- All completion logic is handled in the process_next_conflict function.
 end
 
 ---@brief Rollback to the initial state if rebase fails
@@ -634,8 +649,8 @@ function M.func(input, opts)
   local old_git_editor = vim.fn.getenv("GIT_EDITOR")
   vim.fn.setenv("GIT_EDITOR", ":")
 
-  -- Outer loop: Continue the rebase process
-  while true do
+  -- Define a function to handle the rebase process
+  local function continue_rebase_process()
     -- Attempt to continue the rebase
     local continue_result = vim.fn.system("git rebase --continue 2>&1")
 
@@ -647,45 +662,63 @@ function M.func(input, opts)
       is_success = false
       final_error = conflict_err
       resolution_logs = context.resolution_logs
-      break
+
+      -- Complete with failure
+      if on_complete then
+        on_complete(is_success, final_error)
+      end
+      return
     end
 
     -- If no conflicts, rebase is successful
     if not has_conflicts then
       is_success = true
       resolution_logs = context.resolution_logs
-      break
+
+      -- Complete with success
+      if on_complete then
+        on_complete(is_success, nil)
+      end
+      return
     end
 
     -- Reset attempt counter for this set of conflicts
     context.current_attempt = 0
-    local conflicts_resolved = false
 
-    -- Inner loop: Attempt to resolve conflicts up to max_attempts
-    while context.current_attempt < context.max_attempts do
-      -- Attempt to resolve conflicts
-      local resolution_success, resolution_err = resolve_conflicts(context, opts)
+    -- Define a recursive function to handle resolution attempts
+    local function attempt_resolution()
+      -- Use resolve_conflicts with a callback
+      resolve_conflicts(context, opts, function(resolution_success, resolution_err)
+        if resolution_success then
+          -- If resolution was successful, continue the rebase process
+          continue_rebase_process()
+        else
+          -- Update failure state
+          is_success = false
+          final_error = resolution_err or "Failed to resolve conflicts"
+          resolution_logs = context.resolution_logs
 
-      -- If resolution is successful
-      if resolution_success then
-        conflicts_resolved = true
-        break
-      end
-
-      -- If resolution fails
-      is_success = false
-      final_error = resolution_err or "Failed to resolve conflicts"
-      resolution_logs = context.resolution_logs
-
-      -- Increment attempt counter
-      context.current_attempt = context.current_attempt + 1
+          -- Check if we've reached max attempts
+          if context.current_attempt >= context.max_attempts then
+            -- Report completion with failure
+            if on_complete then
+              on_complete(is_success, final_error)
+            end
+          else
+            -- Try again with the next attempt
+            -- resolve_conflicts will increment the attempt counter
+            attempt_resolution()
+          end
+        end
+      end)
     end
 
-    -- If we failed to resolve conflicts in all attempts, break the outer loop
-    if not conflicts_resolved then
-      break
-    end
+    -- Start the resolution process
+    attempt_resolution()
   end
+
+  -- Start the rebase process
+  continue_rebase_process()
 
   -- If rebase was not successful after all attempts, rollback
   if not is_success then
