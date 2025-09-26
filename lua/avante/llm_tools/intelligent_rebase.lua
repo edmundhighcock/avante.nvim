@@ -684,7 +684,8 @@ local function resolve_conflicts(context, opts, callback)
         "4. [ ] All functionality from both versions is preserved\n\n" ..
         "After you completely resolve all conflicts, I will manually stage the file for you. DO NOT attempt to stage the file yourself.",
         conflict_file,
-        file_content_str:sub(1, 4000) -- Limit size to avoid token issues
+        file_content_str:sub(1, 4000), -- Limit size to avoid token issues
+        conflict_file -- Add missing parameter for the third %s placeholder
       )
     }, {
       on_log = opts.on_log or function() end,
