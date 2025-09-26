@@ -1,0 +1,83 @@
+# Git Conflict Resolution Task
+
+## File Information
+- File path: ${conflict_file}
+- This file contains git merge conflicts that must be resolved
+
+## Conflict File Content
+
+```
+${file_content_str}
+```
+
+## CRITICAL RESOLUTION REQUIREMENTS
+
+1. **REMOVE ALL CONFLICT MARKERS COMPLETELY**:
+   - You MUST remove ALL of these markers: `<<<<<<<`, `=======`, and `>>>>>>>`
+   - A single remaining marker = FAILED resolution
+   - After your changes, run a final check with `view` tool to verify NO markers remain
+
+2. **AVOID DUPLICATE CODE**:
+   - Never include the same code twice
+   - Don't paste both versions - merge them intelligently
+   - Look for repeated functions, variables, or logic blocks
+   - If you see the same or similar code twice, merge it into a single instance
+
+3. **PRESERVE FUNCTIONALITY**:
+   - Keep important code from both versions
+   - When in doubt, include logic from both sides unless they directly contradict
+
+## STEP-BY-STEP RESOLUTION PROCESS
+
+1. **IDENTIFY CONFLICT BOUNDARIES**:
+   - Locate ALL `<<<<<<<`, `=======`, and `>>>>>>>` markers
+   - For each conflict section, clearly identify:
+     - The HEAD version (between `<<<<<<<` and `=======`)
+     - The incoming version (between `=======` and `>>>>>>>`)
+
+2. **ANALYZE EACH CONFLICT**:
+   - For EACH conflict section, determine:
+     - What exactly changed between versions?
+     - Is it simple (comments, formatting) or complex (logic changes)?
+     - Do the changes contradict or complement each other?
+
+3. **RESOLVE EACH CONFLICT**:
+   - For simple changes (formatting, comments):
+     - Choose the most comprehensive version
+
+   - For variable/function name changes:
+     - Use the most descriptive name
+     - Update all references consistently
+
+   - For added/removed functionality:
+     - Usually keep the added functionality
+     - Only remove code if it's clearly replaced
+
+   - For modified logic:
+     - If changes don't conflict, include both
+     - If changes conflict, choose the approach that matches surrounding code
+
+4. **REMOVE ALL MARKERS**:
+   - Delete ALL instances of:
+     - `<<<<<<< HEAD` (and variants)
+     - `=======`
+     - `>>>>>>> branch-name` (and variants)
+
+5. **CHECK FOR DUPLICATES**:
+   - Look for repeated:
+     - Function definitions
+     - Variable declarations
+     - Import statements
+     - Logic blocks
+   - Merge any duplicates you find
+
+## COMMON CONFLICT PATTERNS AND RESOLUTIONS
+
+### Example 1: Simple Comment/Formatting Changes
+```
+<<<<<<< HEAD
+function doThing() {
+  // Old comment
+  return x + y;
+}
+

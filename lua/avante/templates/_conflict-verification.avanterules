@@ -1,0 +1,66 @@
+# Conflict Resolution Verification Task
+
+## File Information
+- File path: ${conflict_file}
+- This file was recently resolved from a git merge conflict
+- Your task is to verify the quality of the resolution
+
+## Resolved File Content
+
+```
+${file_content_str}
+```
+
+## VERIFICATION REQUIREMENTS
+
+1. **Check for conflict markers**:
+   - Look for ANY remaining conflict markers: `<<<<<<<`, `=======`, or `>>>>>>>`
+   - A single remaining marker = FAILED verification
+
+2. **Check for duplicate code**:
+   - Look for any duplicated functions, methods, or classes
+   - Look for repeated blocks of code (3+ similar lines)
+   - Any significant duplication = FAILED verification
+
+3. **Check for logical consistency**:
+   - Ensure the code appears to be syntactically valid
+   - Check that variable names and function calls are consistent
+
+## VERIFICATION RESPONSE FORMAT
+
+Respond with a JSON object containing:
+```json
+{
+  "passed": true|false,
+  "issues": ["list", "of", "issues", "found"]
+}
+```
+
+## EXAMPLES
+
+### Example 1: Failed verification (conflict markers)
+```json
+{
+  "passed": false,
+  "issues": ["Conflict marker '<<<<<<<' found at line 45"]
+}
+```
+
+### Example 2: Failed verification (duplicate code)
+```json
+{
+  "passed": false,
+  "issues": ["Duplicate function 'processData' found at lines 123 and 156"]
+}
+```
+
+### Example 3: Successful verification
+```json
+{
+  "passed": true,
+  "issues": []
+}
+```
+
+BE EXTREMELY THOROUGH in your verification. Missing a conflict marker or duplicate code is a critical failure.
+

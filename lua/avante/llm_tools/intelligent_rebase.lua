@@ -417,6 +417,80 @@ local function detect_conflicts(context)
   return false, nil
 end
 
+---@brief Handle completion of verification agent
+---@param result string The result from the verification agent
+---@param err string|nil Any error that occurred
+---@param context IntelligentRebaseContext The rebase context
+---@param conflict_file string Path to the file being verified
+---@param opts table Options passed to the verification function
+---@param verification_callback fun(is_valid: boolean, issues: table|nil): nil Callback to report verification results
+local function handle_verification_complete(result, err, context, conflict_file, opts, verification_callback)
+  if err then
+    log_rebase_update(context, {
+      stage = "verifying_resolution",
+      details = string.format("Verification agent failed for file: %s", conflict_file),
+      progress = 65,
+      errors = { err }
+    })
+
+    -- Complete this operation and decrement the pending operations counter
+    complete_operation(context, nil, false, err)
+
+    -- Return verification failure due to agent error
+    return verification_callback(false, {"Verification agent failed: " .. err})
+  end
+
+  -- Parse the verification result
+  local verification_result = nil
+  local parse_success, parse_error = pcall(function()
+    -- Extract JSON from the result
+    local json_str = result:match("```json%s*(.-)%s*```") or
+                     result:match("{%s*\"passed\".-}") or
+                     result
+
+    -- Parse the JSON
+    verification_result = vim.fn.json_decode(json_str)
+  end)
+
+  if not parse_success or not verification_result or type(verification_result) ~= "table" or
+     verification_result.passed == nil then
+    log_rebase_update(context, {
+      stage = "verifying_resolution",
+      details = "Failed to parse verification result",
+      progress = 65,
+      errors = { "Invalid verification result format" }
+    })
+
+    -- Complete this operation
+    complete_operation(context, nil, false, "Invalid verification result format")
+
+    -- Return verification failure due to parsing error
+    return verification_callback(false, {"Failed to parse verification result"})
+  end
+
+  -- Log verification result
+  if verification_result.passed then
+    log_rebase_update(context, {
+      stage = "verifying_resolution",
+      details = string.format("Verification passed for file: %s", conflict_file),
+      progress = 70
+    })
+  else
+    log_rebase_update(context, {
+      stage = "verifying_resolution",
+      details = string.format("Verification failed for file: %s", conflict_file),
+      progress = 70,
+      errors = verification_result.issues or {"Unknown verification issues"}
+    })
+  end
+
+  -- Complete this operation
+  complete_operation(context, nil, verification_result.passed, verification_result.passed and nil or "Verification failed")
+
+  -- Return verification result
+  return verification_callback(verification_result.passed, verification_result.issues)
+end
+
 ---@brief Verify a conflict resolution using a verification agent
 ---@param conflict_file string Path to the resolved file
 ---@param context IntelligentRebaseContext
@@ -442,126 +516,17 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   local file_content_str = table.concat(file_content, "\n")
 
   -- Use a separate verification agent to verify the resolution
+  local Utils = require("avante.utils")
+
   require("avante.llm_tools.dispatch_full_agent").func({
-    prompt = string.format(
-      "# Conflict Resolution Verification Task\n\n" ..
-      "## File Information\n" ..
-      "- File path: %s\n" ..
-      "- This file was recently resolved from a git merge conflict\n" ..
-      "- Your task is to verify the quality of the resolution\n\n" ..
-      "## Resolved File Content\n\n```\n%s\n```\n\n" ..
-      "## VERIFICATION REQUIREMENTS\n\n" ..
-      "1. **Check for conflict markers**:\n" ..
-      "   - Look for ANY remaining conflict markers: `<<<<<<<`, `=======`, or `>>>>>>>`\n" ..
-      "   - A single remaining marker = FAILED verification\n\n" ..
-      "2. **Check for duplicate code**:\n" ..
-      "   - Look for any duplicated functions, methods, or classes\n" ..
-      "   - Look for repeated blocks of code (3+ similar lines)\n" ..
-      "   - Any significant duplication = FAILED verification\n\n" ..
-      "3. **Check for logical consistency**:\n" ..
-      "   - Ensure the code appears to be syntactically valid\n" ..
-      "   - Check that variable names and function calls are consistent\n\n" ..
-      "## VERIFICATION RESPONSE FORMAT\n\n" ..
-      "Respond with a JSON object containing:\n" ..
-      "```json\n" ..
-      "{\n" ..
-      "  \"passed\": true|false,\n" ..
-      "  \"issues\": [\"list\", \"of\", \"issues\", \"found\"]\n" ..
-      "}\n" ..
-      "```\n\n" ..
-      "## EXAMPLES\n\n" ..
-      "### Example 1: Failed verification (conflict markers)\n" ..
-      "```json\n" ..
-      "{\n" ..
-      "  \"passed\": false,\n" ..
-      "  \"issues\": [\"Conflict marker '<<<<<<<' found at line 45\"]\n" ..
-      "}\n" ..
-      "```\n\n" ..
-      "### Example 2: Failed verification (duplicate code)\n" ..
-      "```json\n" ..
-      "{\n" ..
-      "  \"passed\": false,\n" ..
-      "  \"issues\": [\"Duplicate function 'processData' found at lines 123 and 156\"]\n" ..
-      "}\n" ..
-      "```\n\n" ..
-      "### Example 3: Successful verification\n" ..
-      "```json\n" ..
-      "{\n" ..
-      "  \"passed\": true,\n" ..
-      "  \"issues\": []\n" ..
-      "}\n" ..
-      "```\n\n" ..
-      "BE EXTREMELY THOROUGH in your verification. Missing a conflict marker or duplicate code is a critical failure.\n",
-      conflict_file,
-      file_content_str:sub(1, 8000) -- Limit size to avoid token issues
-    )
+    prompt = Utils.read_template("_conflict-verification.avanterules", {
+      conflict_file = conflict_file,
+      file_content_str = file_content_str:sub(1, 8000) -- Limit size to avoid token issues
+    })
   }, {
     on_log = opts.on_log or function() end,
     on_complete = function(result, err)
-      if err then
-        log_rebase_update(context, {
-          stage = "verifying_resolution",
-          details = string.format("Verification agent failed for file: %s", conflict_file),
-          progress = 65,
-          errors = { err }
-        })
-
-        -- Complete this operation and decrement the pending operations counter
-        complete_operation(context, nil, false, err)
-
-        -- Return verification failure due to agent error
-        return verification_callback(false, {"Verification agent failed: " .. err})
-      end
-
-      -- Parse the verification result
-      local verification_result = nil
-      local parse_success, parse_error = pcall(function()
-        -- Extract JSON from the result
-        local json_str = result:match("```json%s*(.-)%s*```") or
-                         result:match("{%s*\"passed\".-}") or
-                         result
-
-        -- Parse the JSON
-        verification_result = vim.fn.json_decode(json_str)
-      end)
-
-      if not parse_success or not verification_result or type(verification_result) ~= "table" or
-         verification_result.passed == nil then
-        log_rebase_update(context, {
-          stage = "verifying_resolution",
-          details = "Failed to parse verification result",
-          progress = 65,
-          errors = { "Invalid verification result format" }
-        })
-
-        -- Complete this operation
-        complete_operation(context, nil, false, "Invalid verification result format")
-
-        -- Return verification failure due to parsing error
-        return verification_callback(false, {"Failed to parse verification result"})
-      end
-
-      -- Log verification result
-      if verification_result.passed then
-        log_rebase_update(context, {
-          stage = "verifying_resolution",
-          details = string.format("Verification passed for file: %s", conflict_file),
-          progress = 70
-        })
-      else
-        log_rebase_update(context, {
-          stage = "verifying_resolution",
-          details = string.format("Verification failed for file: %s", conflict_file),
-          progress = 70,
-          errors = verification_result.issues or {"Unknown verification issues"}
-        })
-      end
-
-      -- Complete this operation
-      complete_operation(context, nil, verification_result.passed, verification_result.passed and nil or "Verification failed")
-
-      -- Return verification result
-      return verification_callback(verification_result.passed, verification_result.issues)
+      handle_verification_complete(result, err, context, conflict_file, opts, verification_callback)
     end,
     session_ctx = opts.session_ctx or {},
     store = {
@@ -685,162 +650,14 @@ local function resolve_conflicts(context, opts, callback)
     -- Track this operation as a pending asynchronous operation
     track_operation(context)
 
+    local Utils = require("avante.utils")
+
     -- Use dispatch_full_agent to analyze and resolve conflicts
     require("avante.llm_tools.dispatch_full_agent").func({
-      prompt = string.format(
-        "# Git Conflict Resolution Task\n\n" ..
-        "## File Information\n" ..
-        "- File path: %s\n" ..
-        "- This file contains git merge conflicts that must be resolved\n\n" ..
-        "## Conflict File Content\n\n```\n%s\n```\n\n" ..
-        "## CRITICAL RESOLUTION REQUIREMENTS\n\n" ..
-        "1. **REMOVE ALL CONFLICT MARKERS COMPLETELY**:\n" ..
-        "   - You MUST remove ALL of these markers: `<<<<<<<`, `=======`, and `>>>>>>>` \n" ..
-        "   - A single remaining marker = FAILED resolution\n" ..
-        "   - After your changes, run a final check with `view` tool to verify NO markers remain\n\n" ..
-        "2. **AVOID DUPLICATE CODE**:\n" ..
-        "   - Never include the same code twice\n" ..
-        "   - Don't paste both versions - merge them intelligently\n" ..
-        "   - Look for repeated functions, variables, or logic blocks\n" ..
-        "   - If you see the same or similar code twice, merge it into a single instance\n\n" ..
-        "3. **PRESERVE FUNCTIONALITY**:\n" ..
-        "   - Keep important code from both versions\n" ..
-        "   - When in doubt, include logic from both sides unless they directly contradict\n\n" ..
-        "## STEP-BY-STEP RESOLUTION PROCESS\n\n" ..
-        "1. **IDENTIFY CONFLICT BOUNDARIES**:\n" ..
-        "   - Locate ALL `<<<<<<<`, `=======`, and `>>>>>>>` markers\n" ..
-        "   - For each conflict section, clearly identify:\n" ..
-        "     - The HEAD version (between `<<<<<<<` and `=======`)\n" ..
-        "     - The incoming version (between `=======` and `>>>>>>>`)\n\n" ..
-        "2. **ANALYZE EACH CONFLICT**:\n" ..
-        "   - For EACH conflict section, determine:\n" ..
-        "     - What exactly changed between versions?\n" ..
-        "     - Is it simple (comments, formatting) or complex (logic changes)?\n" ..
-        "     - Do the changes contradict or complement each other?\n\n" ..
-        "3. **RESOLVE EACH CONFLICT**:\n" ..
-        "   - For simple changes (formatting, comments):\n" ..
-        "     - Choose the most comprehensive version\n" ..
-        "   \n" ..
-        "   - For variable/function name changes:\n" ..
-        "     - Use the most descriptive name\n" ..
-        "     - Update all references consistently\n" ..
-        "   \n" ..
-        "   - For added/removed functionality:\n" ..
-        "     - Usually keep the added functionality\n" ..
-        "     - Only remove code if it's clearly replaced\n" ..
-        "   \n" ..
-        "   - For modified logic:\n" ..
-        "     - If changes don't conflict, include both\n" ..
-        "     - If changes conflict, choose the approach that matches surrounding code\n\n" ..
-        "4. **REMOVE ALL MARKERS**:\n" ..
-        "   - Delete ALL instances of:\n" ..
-        "     - `<<<<<<< HEAD` (and variants)\n" ..
-        "     - `=======`\n" ..
-        "     - `>>>>>>> branch-name` (and variants)\n\n" ..
-        "5. **CHECK FOR DUPLICATES**:\n" ..
-        "   - Look for repeated:\n" ..
-        "     - Function definitions\n" ..
-        "     - Variable declarations\n" ..
-        "     - Import statements\n" ..
-        "     - Logic blocks\n" ..
-        "   - Merge any duplicates you find\n\n" ..
-        "## COMMON CONFLICT PATTERNS AND RESOLUTIONS\n\n" ..
-        "### Example 1: Simple Comment/Formatting Changes\n" ..
-        "```\n" ..
-        "<<<<<<< HEAD\n" ..
-        "function doThing() {\n" ..
-        "  // Old comment\n" ..
-        "  return x + y;\n" ..
-        "}\n" ..
-        "=======\n" ..
-        "function doThing() {\n" ..
-        "  // Updated comment\n" ..
-        "  return x + y;\n" ..
-        "}\n" ..
-        ">>>>>>> feature-branch\n" ..
-        "```\n" ..
-        "✅ CORRECT resolution:\n" ..
-        "```\n" ..
-        "function doThing() {\n" ..
-        "  // Updated comment\n" ..
-        "  return x + y;\n" ..
-        "}\n" ..
-        "```\n\n" ..
-        "### Example 2: Added Functionality\n" ..
-        "```\n" ..
-        "<<<<<<< HEAD\n" ..
-        "function process() {\n" ..
-        "  step1();\n" ..
-        "  step2();\n" ..
-        "}\n" ..
-        "=======\n" ..
-        "function process() {\n" ..
-        "  step1();\n" ..
-        "  step2();\n" ..
-        "  step3(); // New step\n" ..
-        "}\n" ..
-        ">>>>>>> feature-branch\n" ..
-        "```\n" ..
-        "✅ CORRECT resolution:\n" ..
-        "```\n" ..
-        "function process() {\n" ..
-        "  step1();\n" ..
-        "  step2();\n" ..
-        "  step3(); // New step\n" ..
-        "}\n" ..
-        "```\n\n" ..
-        "### Example 3: Contradicting Changes\n" ..
-        "```\n" ..
-        "<<<<<<< HEAD\n" ..
-        "const MAX_RETRY = 5;\n" ..
-        "=======\n" ..
-        "const MAX_RETRY = 10;\n" ..
-        ">>>>>>> feature-branch\n" ..
-        "```\n" ..
-        "✅ CORRECT resolution (choose one):\n" ..
-        "```\n" ..
-        "const MAX_RETRY = 10; // Choose the newer value\n" ..
-        "```\n\n" ..
-        "## MANDATORY VERIFICATION STEPS - MUST COMPLETE ALL\n\n" ..
-        "1. **CONFLICT MARKER CHECK**:\n" ..
-        "   - After your changes, use the `view` tool to read the ENTIRE file\n" ..
-        "   - Search for EACH of these patterns:\n" ..
-        "     - `<<<<<<<` (seven less-than signs)\n" ..
-        "     - `=======` (seven equal signs)\n" ..
-        "     - `>>>>>>>` (seven greater-than signs)\n" ..
-        "   - If ANY of these patterns exist, you MUST fix them before continuing\n\n" ..
-        "2. **DUPLICATE CODE CHECK**:\n" ..
-        "   - Scan the entire file for these duplicate patterns:\n" ..
-        "     - Repeated function definitions (look for `function` or `def` keywords appearing twice with similar names)\n" ..
-        "     - Duplicate variable declarations (same variable defined multiple times)\n" ..
-        "     - Repeated blocks of 3+ similar lines\n" ..
-        "     - Identical or nearly identical comments\n" ..
-        "   - For each duplicate found, merge them properly\n\n" ..
-        "3. **FINAL VERIFICATION COMMAND**:\n" ..
-        "   - You MUST run this exact command as your final step:\n" ..
-        "     ```\n" ..
-        "     view path=\"%s\"\n" ..
-        "     ```\n" ..
-        "   - After viewing the file, explicitly confirm:\n" ..
-        "     \"I have verified that NO conflict markers remain and NO duplicate code exists.\"\n\n" ..
-        "## TOOL USAGE REQUIREMENTS\n\n" ..
-        "- DO NOT use git commands directly to edit files\n" ..
-        "- DO NOT use bash commands to edit files\n" ..
-        "- Use ONLY the replace_in_file tool for making changes\n" ..
-        "- Use the view tool to verify your changes\n" ..
-        "- DO NOT invoke any interactive tools or editors\n\n" ..
-        "- LOAD AND USE the rag_search tool if you need to understand the codebase.\n\n" ..
-        "## FINAL CHECKLIST\n\n" ..
-        "Before completing the task, verify:\n" ..
-        "1. [ ] ALL conflict markers are completely removed\n" ..
-        "2. [ ] NO duplicate code exists in the file\n" ..
-        "3. [ ] The code is syntactically valid\n" ..
-        "4. [ ] All functionality from both versions is preserved\n\n" ..
-        "After you completely resolve all conflicts, I will manually stage the file for you. DO NOT attempt to stage the file yourself.",
-        conflict_file,
-        file_content_str:sub(1, 4000), -- Limit size to avoid token issues
-        conflict_file -- Add missing parameter for the third %s placeholder
-      )
+      prompt = Utils.read_template("_conflict-resolution.avanterules", {
+        conflict_file = conflict_file,
+        file_content_str = file_content_str:sub(1, 4000), -- Limit size to avoid token issues
+      })
     }, {
       on_log = opts.on_log or function() end,
       on_complete = function(result, err)
