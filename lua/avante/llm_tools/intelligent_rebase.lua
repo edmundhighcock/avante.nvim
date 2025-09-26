@@ -509,12 +509,29 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   -- Track this operation as a pending asynchronous operation
   track_operation(context)
 
-  log_rebase_update(context, {
-    stage = "verifying_resolution",
-    details = string.format("Verifying conflict resolution quality for file: %s", conflict_file),
-    progress = 60,
-    files = { conflict_file }
-  })
+  -- Get current attempt for this file for better logging
+  local file_attempt = (context.file_attempt_counters or {})[conflict_file] or 0
+  local is_retry = file_attempt > 0
+
+  -- Enhanced logging with retry information
+  if is_retry then
+    log_rebase_update(context, {
+      stage = "verifying_resolution",
+      details = string.format("Verifying conflict resolution quality for file: %s (verification attempt %d/%d)",
+                            conflict_file,
+                            file_attempt,
+                            context.max_attempts),
+      progress = 60,
+      files = { conflict_file }
+    })
+  else
+    log_rebase_update(context, {
+      stage = "verifying_resolution",
+      details = string.format("Verifying conflict resolution quality for file: %s", conflict_file),
+      progress = 60,
+      files = { conflict_file }
+    })
+  end
 
   -- Read the file content to be verified
   local file_content = vim.fn.readfile(conflict_file)
@@ -531,7 +548,9 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   require("avante.llm_tools.dispatch_full_agent").func({
     prompt = Utils.read_template("_conflict-verification.avanterules", {
       conflict_file = conflict_file,
-      file_content_str = file_content_str:sub(1, 8000) -- Limit size to avoid token issues
+      file_content_str = file_content_str:sub(1, 8000), -- Limit size to avoid token issues
+      attempt_number = file_attempt, -- Pass attempt information to the verification agent
+      max_attempts = context.max_attempts
     })
   }, {
     on_log = opts.on_log or function() end,
@@ -557,15 +576,18 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
     -- Resolution verification failed - create a more detailed error message
     local conflict_markers_found = false
     local duplicate_code_found = false
+    local syntax_errors_found = false
     local other_issues = {}
 
-    -- Categorize issues for better reporting
+    -- Categorize issues for better reporting and user action
     if issues then
       for _, issue in ipairs(issues) do
         if issue:match("conflict marker") or issue:match("<<<<<<<") or issue:match("=======") or issue:match(">>>>>>>") then
           conflict_markers_found = true
-        elseif issue:match("duplicate") or issue:match("repeated") then
+        elseif issue:match("duplicate") or issue:match("repeated") or issue:match("redundant") then
           duplicate_code_found = true
+        elseif issue:match("syntax") or issue:match("error") or issue:match("invalid") then
+          syntax_errors_found = true
         else
           table.insert(other_issues, issue)
         end
@@ -580,35 +602,50 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
     if duplicate_code_found then
       table.insert(error_details, "Duplicate code found in resolution")
     end
+    if syntax_errors_found then
+      table.insert(error_details, "Possible syntax errors in resolved file")
+    end
     if #other_issues > 0 then
       table.insert(error_details, "Other issues: " .. table.concat(other_issues, "; "))
     end
 
     local error_msg = "Resolution verification failed: " .. table.concat(error_details, ". ")
 
-    -- Log the detailed error
+    -- Store file-specific attempt counter if it doesn't exist
+    context.file_attempt_counters = context.file_attempt_counters or {}
+    context.file_attempt_counters[conflict_file] = (context.file_attempt_counters[conflict_file] or 0) + 1
+    local file_attempt = context.file_attempt_counters[conflict_file]
+
+    -- Log the detailed error with attempt information
     table.insert(resolution_errors, {
       file = conflict_file,
       error = error_msg,
-      issues = issues -- Store original issues for potential retry
+      issues = issues, -- Store original issues for potential retry
+      attempt = file_attempt -- Track which attempt this was
     })
 
     -- Update with categorized errors for better user feedback
     log_rebase_update(context, {
       stage = "resolving_conflicts",
-      details = "Resolution verification failed - " ..
+      details = string.format("Resolution verification failed (attempt %d/%d) - %s",
+                file_attempt,
+                context.max_attempts,
                 (conflict_markers_found and "conflict markers remain" or
                  duplicate_code_found and "duplicate code detected" or
-                 "see issues for details"),
+                 syntax_errors_found and "syntax errors detected" or
+                 "see issues for details")),
       progress = 80,
       errors = issues or {"Unknown verification issues"}
     })
 
-    -- If we still have attempts left, try again with the same file
-    if context.current_attempt < context.max_attempts then
+    -- If we still have attempts left for this file, try again with the same file
+    if file_attempt < context.max_attempts then
       log_rebase_update(context, {
         stage = "resolving_conflicts",
-        details = string.format("Retrying resolution for file: %s (failed verification)", conflict_file),
+        details = string.format("Retrying resolution for file: %s (attempt %d/%d)",
+                              conflict_file,
+                              file_attempt + 1,
+                              context.max_attempts),
         progress = 80,
         errors = issues or {"Unknown verification issues"}
       })
@@ -622,7 +659,9 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
       -- Max attempts reached for this file, log and move on
       log_rebase_update(context, {
         stage = "resolving_conflicts",
-        details = string.format("Maximum resolution attempts reached for file: %s", conflict_file),
+        details = string.format("Maximum resolution attempts (%d) reached for file: %s",
+                              context.max_attempts,
+                              conflict_file),
         progress = 80,
         errors = {"Failed to resolve after maximum attempts"}
       })
@@ -700,13 +739,33 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
   if index > #context.conflict_files then
     -- All conflicts processed, check for errors
     if #resolution_errors > 0 then
+      -- Count how many files had errors
+      local failed_files = {}
+      for _, err in ipairs(resolution_errors) do
+        failed_files[err.file] = true
+      end
+      local failed_file_count = vim.tbl_count(failed_files)
+
+      -- Group errors by file for better reporting
+      local errors_by_file = {}
+      for _, err in ipairs(resolution_errors) do
+        errors_by_file[err.file] = errors_by_file[err.file] or {}
+        table.insert(errors_by_file[err.file], err.error)
+      end
+
+      -- Create a summary of errors
+      local error_summary = {}
+      for file, errors in pairs(errors_by_file) do
+        table.insert(error_summary, string.format("File %s: %s", file, table.concat(errors, "; ")))
+      end
+
       log_rebase_update(context, {
         stage = "resolving_conflicts",
-        details = string.format("Partial resolution failure (%d errors)", #resolution_errors),
+        details = string.format("Partial resolution failure (%d/%d files)", failed_file_count, #context.conflict_files),
         progress = 90,
-        errors = vim.tbl_map(function(err) return err.error end, resolution_errors)
+        errors = error_summary
       })
-      return callback(false, "Some conflicts could not be resolved automatically")
+      return callback(false, string.format("%d/%d files could not be resolved automatically", failed_file_count, #context.conflict_files))
     end
 
     -- Set GIT_EDITOR to prevent interactive editor sessions
@@ -733,9 +792,17 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
       return callback(false, "Failed to continue rebase: " .. continue_result)
     end
 
+    -- Create a summary of successful resolutions
+    local success_summary = string.format(
+      "Successfully resolved all conflicts in %d files (Global attempt %d/%d)",
+      #context.conflict_files,
+      context.current_attempt,
+      context.max_attempts
+    )
+
     log_rebase_update(context, {
       stage = "resolving_conflicts",
-      details = string.format("Successfully resolved conflicts (Attempt %d)", context.current_attempt),
+      details = success_summary,
       progress = 100
     })
 
@@ -745,12 +812,29 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
   -- Get the current conflict file to process
   local conflict_file = context.conflict_files[index]
 
-  log_rebase_update(context, {
-    stage = "resolving_conflicts",
-    details = string.format("Analyzing conflict in file: %s", conflict_file),
-    progress = 50,
-    files = { conflict_file }
-  })
+  -- Get current attempt for this file
+  local file_attempt = (context.file_attempt_counters or {})[conflict_file] or 0
+  local is_retry = file_attempt > 0
+
+  -- Log with retry information if applicable
+  if is_retry then
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = string.format("Retrying conflict resolution for file: %s (attempt %d/%d)",
+                            conflict_file,
+                            file_attempt + 1,
+                            context.max_attempts),
+      progress = 50,
+      files = { conflict_file }
+    })
+  else
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = string.format("Analyzing conflict in file: %s", conflict_file),
+      progress = 50,
+      files = { conflict_file }
+    })
+  end
 
   -- Validate file before attempting resolution
   if not vim.fn.filereadable(conflict_file) then
@@ -862,23 +946,30 @@ end
 ---@param opts? table Optional configuration options
 ---@param callback fun(success: boolean, error: string | nil): nil Callback to be called when all conflicts are resolved
 local function resolve_conflicts(context, opts, callback)
+  -- Initialize the global attempt counter if not already set
   context.current_attempt = context.current_attempt + 1
+
+  -- Initialize file-specific attempt counters if they don't exist
+  context.file_attempt_counters = context.file_attempt_counters or {}
 
   log_rebase_update(context, {
     stage = "resolving_conflicts",
-    details = string.format("Attempting to resolve conflicts (Attempt %d/%d)", context.current_attempt, context.max_attempts),
+    details = string.format("Attempting to resolve conflicts (Global attempt %d/%d)",
+                          context.current_attempt,
+                          context.max_attempts),
     progress = 25,
     files = context.conflict_files
   })
 
+  -- Check if we've exceeded the global maximum attempts
   if context.current_attempt > context.max_attempts then
     log_rebase_update(context, {
       stage = "resolving_conflicts",
-      details = "Maximum resolution attempts exceeded",
+      details = "Maximum global resolution attempts exceeded",
       progress = 100,
       errors = { "Could not resolve conflicts after maximum attempts" }
     })
-    return callback(false, "Maximum resolution attempts exceeded")
+    return callback(false, "Maximum global resolution attempts exceeded")
   end
 
   local resolution_errors = {}
@@ -963,16 +1054,55 @@ local function finalize_rebase(context, success, error, old_git_editor, is_succe
     pcall(on_state_change, final_state)
   end
 
-  -- Create final status message with appropriate state
+  -- Generate a retry statistics summary
+  local retry_stats = {}
+  if context.file_attempt_counters then
+    local total_retries = 0
+    local files_with_retries = 0
+    local max_retries_for_file = 0
+
+    for file, attempts in pairs(context.file_attempt_counters) do
+      if attempts > 0 then
+        total_retries = total_retries + attempts
+        files_with_retries = files_with_retries + 1
+        max_retries_for_file = math.max(max_retries_for_file, attempts)
+      end
+    end
+
+    if files_with_retries > 0 then
+      retry_stats = {
+        string.format("Files requiring retries: %d", files_with_retries),
+        string.format("Total retry attempts: %d", total_retries),
+        string.format("Maximum retries for a single file: %d", max_retries_for_file),
+        string.format("Average retries per file: %.1f", total_retries / files_with_retries)
+      }
+    end
+  end
+
+  -- Create final status message with appropriate state and retry statistics
   local final_message
   if final_error then
+    local message_text = "Rebase Failed: " .. error_message
+
+    -- Add retry statistics if available
+    if #retry_stats > 0 then
+      message_text = message_text .. "\n\nRetry Statistics:\n- " .. table.concat(retry_stats, "\n- ")
+    end
+
     final_message = History.Message:new("assistant",
-      "Rebase Failed: " .. error_message,
+      message_text,
       { just_for_display = true, state = "failed" }
     )
   else
+    local message_text = "Rebase Completed Successfully"
+
+    -- Add retry statistics if available
+    if #retry_stats > 0 then
+      message_text = message_text .. "\n\nRetry Statistics:\n- " .. table.concat(retry_stats, "\n- ")
+    end
+
     final_message = History.Message:new("assistant",
-      "Rebase Completed Successfully",
+      message_text,
       { just_for_display = true, state = "succeeded" }
     )
   end
@@ -1035,9 +1165,45 @@ local function attempt_resolution(context, opts)
     else
       -- Check if we've reached max attempts
       if context.current_attempt >= context.max_attempts then
+        -- Generate a detailed summary of the resolution attempts
+        local attempt_summary = {}
+
+        -- Count failed files and their attempts
+        local failed_files = {}
+        for file, attempts in pairs(context.file_attempt_counters or {}) do
+          if attempts >= context.max_attempts then
+            table.insert(failed_files, string.format("%s (reached max %d attempts)", file, attempts))
+          end
+        end
+
+        -- Create a detailed error message
+        local detailed_error = string.format(
+          "Failed to resolve conflicts after %d global attempts. %d files could not be resolved: %s",
+          context.current_attempt,
+          #failed_files,
+          table.concat(failed_files, ", ")
+        )
+
+        -- Log the detailed summary
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = "Maximum resolution attempts reached with detailed summary",
+          progress = 100,
+          errors = { detailed_error }
+        })
+
         -- Report completion with failure
-        context.finalize_rebase(false, resolution_err or "Failed to resolve conflicts")
+        context.finalize_rebase(false, resolution_err or detailed_error)
       else
+        -- Log that we're starting another global attempt
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = string.format("Starting global resolution attempt %d/%d",
+                                context.current_attempt + 1,
+                                context.max_attempts),
+          progress = 20
+        })
+
         -- Try again with the next attempt
         -- resolve_conflicts will increment the attempt counter
         attempt_resolution(context, opts)
