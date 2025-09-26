@@ -21,6 +21,10 @@ local History = require("avante.history")
 ---@field resolution_logs table[]
 ---@field initial_head string
 ---@field on_log? fun(update: {type: string, data: RebaseUpdateLog}): nil
+---@field on_messages_add? fun(messages: any[]): nil
+---@field on_state_change? fun(state: string): nil
+---@field history_messages table[]
+---@field current_state string
 
 ---@class AvanteLLMTool
 local M = setmetatable({}, Base)
@@ -109,6 +113,9 @@ M.returns = {
 ---@param context IntelligentRebaseContext
 ---@param update RebaseUpdateLog
 local function log_rebase_update(context, update)
+  -- Ensure context.history_messages is initialized
+  context.history_messages = context.history_messages or {}
+
   -- Add update to context's resolution_logs
   table.insert(context.resolution_logs, {
     timestamp = os.time(),
@@ -134,22 +141,28 @@ local function log_rebase_update(context, update)
     state = update.stage
   })
 
+  -- Store the current state in the context
+  context.current_state = update.stage
+
+  -- Add message to history messages
+  table.insert(context.history_messages, history_message)
+
   -- Notify via on_log callback for real-time updates
   if context.on_log then
-    context.on_log({
+    pcall(context.on_log, {
       type = "rebase_update",
       data = update
     })
   end
 
-  -- Manage history messages and trigger sidebar updates
-  if context.history_messages then
-    table.insert(context.history_messages, history_message)
-  end
-
   -- Support on_messages_add callback for incremental history updates
   if context.on_messages_add then
-    context.on_messages_add({ history_message })
+    pcall(context.on_messages_add, { history_message })
+  end
+
+  -- Support on_state_change callback for updating the state in the sidebar
+  if context.on_state_change then
+    pcall(context.on_state_change, update.stage)
   end
 end
 
@@ -173,7 +186,8 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
     max_attempts = max_attempts or 3,
     conflict_files = {},
     resolution_logs = {},
-    initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", "")
+    initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", ""),
+    current_state = "initializing" -- Initialize state
   }
 
   log_rebase_update(context, {
@@ -479,6 +493,8 @@ function M.func(input, opts)
   local on_log = opts.on_log
   local on_complete = opts.on_complete
   local on_messages_add = opts.on_messages_add
+  local on_state_change = opts.on_state_change
+  local session_ctx = opts.session_ctx
 
   -- Track the overall result and error state
   local is_success = false
@@ -496,28 +512,46 @@ function M.func(input, opts)
     final_error = init_err
     resolution_logs = {}
 
-        -- Convert error to string to prevent concatenation issues
-        local error_str = "Unknown error"
-        if type(init_err) == "table" then
-          error_str = vim.inspect(init_err)
-        elseif init_err ~= nil then
-          error_str = tostring(init_err)
-        end
+    -- Convert error to string to prevent concatenation issues
+    local error_str = "Unknown error"
+    if type(init_err) == "table" then
+      error_str = vim.inspect(init_err)
+    elseif init_err ~= nil then
+      error_str = tostring(init_err)
+    end
 
-        local history_message = History.Message:new_assistant_synthetic(
-          "Rebase Initialization Failed: " .. (error_str or "Unknown error")
-        )
+    -- Update state to failed
+    if on_state_change then
+      pcall(on_state_change, "failed")
+    end
 
-        if on_complete then
-          on_complete(is_success, final_error)
-        end
+    -- Create error message
+    local history_message = History.Message:new("assistant",
+      "Rebase Initialization Failed: " .. error_str,
+      { just_for_display = true, state = "failed" }
+    )
 
-        return is_success, final_error
-      end
+    -- Add message to sidebar
+    if on_messages_add then
+      pcall(function()
+        on_messages_add({ history_message })
+      end)
+    end
 
-  -- Add on_log and on_messages_add callbacks to context for updates
+    -- Complete with error
+    if on_complete then
+      pcall(function()
+        on_complete(is_success, error_str)
+      end)
+    end
+
+    return is_success, final_error
+  end
+
+  -- Add on_log, on_messages_add, and on_state_change callbacks to context for updates
   context.on_log = on_log
   context.on_messages_add = on_messages_add
+  context.on_state_change = on_state_change
   context.history_messages = {}
 
   -- Outer loop: Continue the rebase process
@@ -587,29 +621,43 @@ function M.func(input, opts)
     (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
   end
 
-  if final_error then
-    table.insert(final_history_messages, History.Message:new("assistant",
-    "Rebase Failed: " .. error_message,
-    { just_for_display = true }
-    ))
-  else
-    table.insert(final_history_messages, History.Message:new("assistant",
-    "Rebase Completed Successfully",
-    { just_for_display = true }
-  ))
+  -- Update final state
+  local final_state = is_success and "succeeded" or "failed"
+  if on_state_change then
+    pcall(on_state_change, final_state)
   end
+
+  -- Create final status message with appropriate state
+  local final_message
+  if final_error then
+    final_message = History.Message:new("assistant",
+      "Rebase Failed: " .. error_message,
+      { just_for_display = true, state = "failed" }
+    )
+  else
+    final_message = History.Message:new("assistant",
+      "Rebase Completed Successfully",
+      { just_for_display = true, state = "succeeded" }
+    )
+  end
+
+  -- Add final message to history messages
+  table.insert(final_history_messages, final_message)
 
   -- If on_messages_add is provided, use it to add history messages
   if on_messages_add then
-    on_messages_add(final_history_messages)
+    -- Use pcall to handle potential errors
+    pcall(function()
+      on_messages_add(final_history_messages)
+    end)
   end
-
-  -- Safely create error table
-  local error_table = final_error and { error = error_message } or nil
 
   -- If on_complete is provided, call it with the results
   if on_complete then
-    on_complete(is_success, error_message)
+    -- Use pcall to handle potential errors
+    pcall(function()
+      on_complete(is_success, error_message)
+    end)
   end
 
   -- If on_complete is not provided, return the results directly
