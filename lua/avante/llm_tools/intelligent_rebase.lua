@@ -81,11 +81,18 @@ M.param = {
       type = "number",
       optional = true,
     },
+    {
+      name = "continue",
+      description = "Continue an existing rebase in progress without re-initializing",
+      type = "boolean",
+      optional = true,
+    },
   },
   usage = {
     source_branch = "Name of the source branch to rebase",
     target_branch = "Name of the target branch to rebase onto",
     max_attempts = "Optional maximum number of resolution attempts",
+    continue = "Optional flag to continue an existing rebase without re-initializing",
   },
 }
 
@@ -548,51 +555,73 @@ function M.func(input, opts)
   local resolution_logs = {}
   local final_error = nil
 
-  local context, init_err = initialize_rebase(
-    input.source_branch,
-    input.target_branch,
-    input.max_attempts
-  )
+  -- If continue is true, skip initialization
+  local context
+  if input.continue then
+    context = {
+      source_branch = input.source_branch,
+      target_branch = input.target_branch,
+      current_attempt = 0,
+      max_attempts = input.max_attempts or 3,
+      conflict_files = {},
+      resolution_logs = {},
+      initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", ""),
+      current_state = "continuing"
+    }
 
-  if init_err then
-    is_success = false
-    final_error = init_err
-    resolution_logs = {}
-
-    -- Convert error to string to prevent concatenation issues
-    local error_str = "Unknown error"
-    if type(init_err) == "table" then
-      error_str = vim.inspect(init_err)
-    elseif init_err ~= nil then
-      error_str = tostring(init_err)
-    end
-
-    -- Update state to failed
-    if on_state_change then
-      pcall(on_state_change, "failed")
-    end
-
-    -- Create error message
-    local history_message = History.Message:new("assistant",
-      "Rebase Initialization Failed: " .. error_str,
-      { just_for_display = true, state = "failed" }
+    log_rebase_update(context, {
+      stage = "continuing",
+      details = "Continuing an existing rebase in progress",
+      progress = 50,
+    })
+  else
+    local init_err
+    context, init_err = initialize_rebase(
+      input.source_branch,
+      input.target_branch,
+      input.max_attempts
     )
 
-    -- Add message to sidebar
-    if on_messages_add then
-      pcall(function()
-        on_messages_add({ history_message })
-      end)
-    end
+    if init_err then
+      is_success = false
+      final_error = init_err
+      resolution_logs = {}
 
-    -- Complete with error
-    if on_complete then
-      pcall(function()
-        on_complete(is_success, error_str)
-      end)
-    end
+      -- Convert error to string to prevent concatenation issues
+      local error_str = "Unknown error"
+      if type(init_err) == "table" then
+        error_str = vim.inspect(init_err)
+      elseif init_err ~= nil then
+        error_str = tostring(init_err)
+      end
 
-    return is_success, final_error
+      -- Update state to failed
+      if on_state_change then
+        pcall(on_state_change, "failed")
+      end
+
+      -- Create error message
+      local history_message = History.Message:new("assistant",
+        "Rebase Initialization Failed: " .. error_str,
+        { just_for_display = true, state = "failed" }
+      )
+
+      -- Add message to sidebar
+      if on_messages_add then
+        pcall(function()
+          on_messages_add({ history_message })
+        end)
+      end
+
+      -- Complete with error
+      if on_complete then
+        pcall(function()
+          on_complete(is_success, error_str)
+        end)
+      end
+
+      return is_success, final_error
+    end
   end
 
   -- Add on_log, on_messages_add, and on_state_change callbacks to context for updates
