@@ -416,7 +416,8 @@ local function resolve_conflicts(context, opts)
         "File content with conflict markers is shown below:\n\n%s\n\n" ..
         "Provide a resolution strategy that preserves code intent and minimizes changes.\n" ..
         "Use the replace_in_file tool to resolve the conflict by replacing the content between conflict markers with the resolved code.\n" ..
-        "DO NOT use git commands directly. Instead, use the replace_in_file tool to modify the file.\n" ..
+        "DO NOT use git commands directly to edit files. Don't use bash commands to edit files. Instead, use the replace_in_file tool, or similar tools, to modify the file.\n" ..
+        "Use git_status instead of running a bash command to check the current git status.\n" ..
         "After resolving conflicts with replace_in_file, use git_add to stage the resolved file.\n" ..
         "CRITICAL SAFETY INSTRUCTIONS:\n" ..
         "1. Do not modify binary files\n" ..
