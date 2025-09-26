@@ -188,9 +188,10 @@ local function log_rebase_update(context, update)
     errors = update.errors or {}
   })
 
-  -- Prepare a detailed, user-friendly message with emoji and clear formatting
+  -- Prepare a detailed, user-friendly message with emoji, timestamp, and clear formatting
   local message_content = string.format(
-    "🔄 Intelligent Rebase Update\n- Stage: %s\n- Details: %s\n- Progress: %d%%\n%s",
+    "🔄 Intelligent Rebase Update [%s]\n- Stage: %s\n- Details: %s\n- Progress: %d%%\n%s",
+    os.date("%H:%M:%S"),  -- Add timestamp for more distinct updates
     update.stage,
     update.details,
     update.progress,
@@ -220,6 +221,11 @@ local function log_rebase_update(context, update)
   -- Support on_messages_add callback for incremental history updates
   if context.on_messages_add then
     pcall(context.on_messages_add, { history_message })
+
+    -- Force a redraw to ensure UI updates
+    vim.schedule(function()
+      vim.cmd("redraw")
+    end)
   end
 
   -- Support on_state_change callback for updating the state in the sidebar
