@@ -542,56 +542,146 @@ local function resolve_conflicts(context, opts, callback)
         "## Conflict File Content\n\n```\n%s\n```\n\n" ..
         "## CRITICAL RESOLUTION REQUIREMENTS\n\n" ..
         "1. **REMOVE ALL CONFLICT MARKERS COMPLETELY**:\n" ..
-        "   - Remove ALL instances of `<<<<<<<`, `=======`, and `>>>>>>>` markers\n" ..
-        "   - A file with ANY remaining conflict markers is considered UNRESOLVED\n" ..
-        "   - ALWAYS verify the final content has NO conflict markers before completing\n\n" ..
-        "2. **PRESERVE FUNCTIONALITY FROM BOTH VERSIONS**:\n" ..
-        "   - Carefully analyze the semantic meaning of both HEAD and incoming changes\n" ..
-        "   - Prioritize preserving functionality over preserving exact code structure\n" ..
-        "   - When in doubt, include logic from both versions unless they directly contradict\n" ..
-        "   - Ensure all variables, functions, and logic paths from both sides are preserved\n\n" ..
-        "3. **RESOLUTION STRATEGY**:\n" ..
-        "   - For simple conflicts (formatting, comments, minor changes), use the more comprehensive version\n" ..
-        "   - For complex conflicts, merge functionality from both versions\n" ..
-        "   - For conflicting functionality, prefer the approach that is more consistent with surrounding code\n" ..
-        "   - For variable/function name conflicts, use the most descriptive name and update references\n\n" ..
-        "## REQUIRED WORKFLOW\n\n" ..
-        "1. First, use rag_search to investigate the codebase and understand the context:\n" ..
-        "   - Search for related functions, classes, and usage patterns\n" ..
-        "   - Understand the broader architecture and design patterns\n" ..
-        "   - Look for similar code elsewhere that might inform your resolution strategy\n\n" ..
-        "2. Carefully analyze the conflict by identifying:\n" ..
-        "   - What changed between versions\n" ..
-        "   - The intent behind each change\n" ..
-        "   - How the changes relate to surrounding code\n\n" ..
-        "3. Develop a clear resolution strategy before making changes\n\n" ..
-        "4. Use ONLY the replace_in_file tool to implement your resolution\n\n" ..
-        "5. VERIFY your changes:\n" ..
-        "   - Confirm ALL conflict markers are removed\n" ..
-        "   - Ensure code is syntactically valid\n" ..
-        "   - Check that functionality from both versions is preserved\n" ..
-        "   - Verify the code will compile/run without errors\n\n" ..
-        "6. EXPLICITLY VERIFY the file is completely resolved using the view tool:\n" ..
-        "   - Scan the entire file to ensure NO conflict markers remain\n" ..
-        "   - Check for syntax errors or inconsistencies\n\n" ..
+        "   - You MUST remove ALL of these markers: `<<<<<<<`, `=======`, and `>>>>>>>` \n" ..
+        "   - A single remaining marker = FAILED resolution\n" ..
+        "   - After your changes, run a final check with `view` tool to verify NO markers remain\n\n" ..
+        "2. **AVOID DUPLICATE CODE**:\n" ..
+        "   - Never include the same code twice\n" ..
+        "   - Don't paste both versions - merge them intelligently\n" ..
+        "   - Look for repeated functions, variables, or logic blocks\n" ..
+        "   - If you see the same or similar code twice, merge it into a single instance\n\n" ..
+        "3. **PRESERVE FUNCTIONALITY**:\n" ..
+        "   - Keep important code from both versions\n" ..
+        "   - When in doubt, include logic from both sides unless they directly contradict\n\n" ..
+        "## STEP-BY-STEP RESOLUTION PROCESS\n\n" ..
+        "1. **IDENTIFY CONFLICT BOUNDARIES**:\n" ..
+        "   - Locate ALL `<<<<<<<`, `=======`, and `>>>>>>>` markers\n" ..
+        "   - For each conflict section, clearly identify:\n" ..
+        "     - The HEAD version (between `<<<<<<<` and `=======`)\n" ..
+        "     - The incoming version (between `=======` and `>>>>>>>`)\n\n" ..
+        "2. **ANALYZE EACH CONFLICT**:\n" ..
+        "   - For EACH conflict section, determine:\n" ..
+        "     - What exactly changed between versions?\n" ..
+        "     - Is it simple (comments, formatting) or complex (logic changes)?\n" ..
+        "     - Do the changes contradict or complement each other?\n\n" ..
+        "3. **RESOLVE EACH CONFLICT**:\n" ..
+        "   - For simple changes (formatting, comments):\n" ..
+        "     - Choose the most comprehensive version\n" ..
+        "   \n" ..
+        "   - For variable/function name changes:\n" ..
+        "     - Use the most descriptive name\n" ..
+        "     - Update all references consistently\n" ..
+        "   \n" ..
+        "   - For added/removed functionality:\n" ..
+        "     - Usually keep the added functionality\n" ..
+        "     - Only remove code if it's clearly replaced\n" ..
+        "   \n" ..
+        "   - For modified logic:\n" ..
+        "     - If changes don't conflict, include both\n" ..
+        "     - If changes conflict, choose the approach that matches surrounding code\n\n" ..
+        "4. **REMOVE ALL MARKERS**:\n" ..
+        "   - Delete ALL instances of:\n" ..
+        "     - `<<<<<<< HEAD` (and variants)\n" ..
+        "     - `=======`\n" ..
+        "     - `>>>>>>> branch-name` (and variants)\n\n" ..
+        "5. **CHECK FOR DUPLICATES**:\n" ..
+        "   - Look for repeated:\n" ..
+        "     - Function definitions\n" ..
+        "     - Variable declarations\n" ..
+        "     - Import statements\n" ..
+        "     - Logic blocks\n" ..
+        "   - Merge any duplicates you find\n\n" ..
+        "## COMMON CONFLICT PATTERNS AND RESOLUTIONS\n\n" ..
+        "### Example 1: Simple Comment/Formatting Changes\n" ..
+        "```\n" ..
+        "<<<<<<< HEAD\n" ..
+        "function doThing() {\n" ..
+        "  // Old comment\n" ..
+        "  return x + y;\n" ..
+        "}\n" ..
+        "=======\n" ..
+        "function doThing() {\n" ..
+        "  // Updated comment\n" ..
+        "  return x + y;\n" ..
+        "}\n" ..
+        ">>>>>>> feature-branch\n" ..
+        "```\n" ..
+        "✅ CORRECT resolution:\n" ..
+        "```\n" ..
+        "function doThing() {\n" ..
+        "  // Updated comment\n" ..
+        "  return x + y;\n" ..
+        "}\n" ..
+        "```\n\n" ..
+        "### Example 2: Added Functionality\n" ..
+        "```\n" ..
+        "<<<<<<< HEAD\n" ..
+        "function process() {\n" ..
+        "  step1();\n" ..
+        "  step2();\n" ..
+        "}\n" ..
+        "=======\n" ..
+        "function process() {\n" ..
+        "  step1();\n" ..
+        "  step2();\n" ..
+        "  step3(); // New step\n" ..
+        "}\n" ..
+        ">>>>>>> feature-branch\n" ..
+        "```\n" ..
+        "✅ CORRECT resolution:\n" ..
+        "```\n" ..
+        "function process() {\n" ..
+        "  step1();\n" ..
+        "  step2();\n" ..
+        "  step3(); // New step\n" ..
+        "}\n" ..
+        "```\n\n" ..
+        "### Example 3: Contradicting Changes\n" ..
+        "```\n" ..
+        "<<<<<<< HEAD\n" ..
+        "const MAX_RETRY = 5;\n" ..
+        "=======\n" ..
+        "const MAX_RETRY = 10;\n" ..
+        ">>>>>>> feature-branch\n" ..
+        "```\n" ..
+        "✅ CORRECT resolution (choose one):\n" ..
+        "```\n" ..
+        "const MAX_RETRY = 10; // Choose the newer value\n" ..
+        "```\n\n" ..
+        "## MANDATORY VERIFICATION STEPS - MUST COMPLETE ALL\n\n" ..
+        "1. **CONFLICT MARKER CHECK**:\n" ..
+        "   - After your changes, use the `view` tool to read the ENTIRE file\n" ..
+        "   - Search for EACH of these patterns:\n" ..
+        "     - `<<<<<<<` (seven less-than signs)\n" ..
+        "     - `=======` (seven equal signs)\n" ..
+        "     - `>>>>>>>` (seven greater-than signs)\n" ..
+        "   - If ANY of these patterns exist, you MUST fix them before continuing\n\n" ..
+        "2. **DUPLICATE CODE CHECK**:\n" ..
+        "   - Scan the entire file for these duplicate patterns:\n" ..
+        "     - Repeated function definitions (look for `function` or `def` keywords appearing twice with similar names)\n" ..
+        "     - Duplicate variable declarations (same variable defined multiple times)\n" ..
+        "     - Repeated blocks of 3+ similar lines\n" ..
+        "     - Identical or nearly identical comments\n" ..
+        "   - For each duplicate found, merge them properly\n\n" ..
+        "3. **FINAL VERIFICATION COMMAND**:\n" ..
+        "   - You MUST run this exact command as your final step:\n" ..
+        "     ```\n" ..
+        "     view path=\"%s\"\n" ..
+        "     ```\n" ..
+        "   - After viewing the file, explicitly confirm:\n" ..
+        "     \"I have verified that NO conflict markers remain and NO duplicate code exists.\"\n\n" ..
         "## TOOL USAGE REQUIREMENTS\n\n" ..
         "- DO NOT use git commands directly to edit files\n" ..
         "- DO NOT use bash commands to edit files\n" ..
         "- Use ONLY the replace_in_file tool for making changes\n" ..
         "- Use the view tool to verify your changes\n" ..
         "- DO NOT invoke any interactive tools or editors\n\n" ..
-        "## SAFETY CONSTRAINTS\n\n" ..
-        "- Maintain existing code style (indentation, spacing, naming conventions)\n" ..
-        "- Preserve comments when possible\n" ..
-        "- Do not add new features or functionality\n" ..
-        "- Do not remove functionality unless it's explicitly replaced\n" ..
-        "- Ensure the final code is syntactically correct\n\n" ..
-        "## FINAL VERIFICATION CHECKLIST\n\n" ..
-        "Before considering the task complete, verify:\n" ..
-        "1. ALL conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) are completely removed\n" ..
-        "2. The code is syntactically valid and would compile/run\n" ..
-        "3. All functionality from both versions is preserved\n" ..
-        "4. The code style matches the surrounding code\n\n" ..
+        "## FINAL CHECKLIST\n\n" ..
+        "Before completing the task, verify:\n" ..
+        "1. [ ] ALL conflict markers are completely removed\n" ..
+        "2. [ ] NO duplicate code exists in the file\n" ..
+        "3. [ ] The code is syntactically valid\n" ..
+        "4. [ ] All functionality from both versions is preserved\n\n" ..
         "After you completely resolve all conflicts, I will manually stage the file for you. DO NOT attempt to stage the file yourself.",
         conflict_file,
         file_content_str:sub(1, 4000) -- Limit size to avoid token issues
