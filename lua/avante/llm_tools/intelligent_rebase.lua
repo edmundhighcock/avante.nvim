@@ -550,18 +550,22 @@ local function resolve_conflicts(context, opts, callback)
         "   - For conflicting functionality, prefer the approach that is more consistent with surrounding code\n" ..
         "   - For variable/function name conflicts, use the most descriptive name and update references\n\n" ..
         "## REQUIRED WORKFLOW\n\n" ..
-        "1. First, carefully analyze the conflict by identifying:\n" ..
+        "1. First, use rag_search to investigate the codebase and understand the context:\n" ..
+        "   - Search for related functions, classes, and usage patterns\n" ..
+        "   - Understand the broader architecture and design patterns\n" ..
+        "   - Look for similar code elsewhere that might inform your resolution strategy\n\n" ..
+        "2. Carefully analyze the conflict by identifying:\n" ..
         "   - What changed between versions\n" ..
         "   - The intent behind each change\n" ..
         "   - How the changes relate to surrounding code\n\n" ..
-        "2. Develop a clear resolution strategy before making changes\n\n" ..
-        "3. Use ONLY the replace_in_file tool to implement your resolution\n\n" ..
-        "4. VERIFY your changes:\n" ..
+        "3. Develop a clear resolution strategy before making changes\n\n" ..
+        "4. Use ONLY the replace_in_file tool to implement your resolution\n\n" ..
+        "5. VERIFY your changes:\n" ..
         "   - Confirm ALL conflict markers are removed\n" ..
         "   - Ensure code is syntactically valid\n" ..
         "   - Check that functionality from both versions is preserved\n" ..
         "   - Verify the code will compile/run without errors\n\n" ..
-        "5. EXPLICITLY VERIFY the file is completely resolved using the view tool\n" ..
+        "6. EXPLICITLY VERIFY the file is completely resolved using the view tool:\n" ..
         "   - Scan the entire file to ensure NO conflict markers remain\n" ..
         "   - Check for syntax errors or inconsistencies\n\n" ..
         "## TOOL USAGE REQUIREMENTS\n\n" ..
