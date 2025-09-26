@@ -529,20 +529,60 @@ local function resolve_conflicts(context, opts, callback)
     -- Use dispatch_full_agent to analyze and resolve conflicts
     require("avante.llm_tools.dispatch_full_agent").func({
       prompt = string.format(
-        "Analyze and resolve git merge conflict in file: %s\n" ..
-        "File content with conflict markers is shown below:\n\n%s\n\n" ..
-        "Provide a resolution strategy that preserves code intent and minimizes changes.\n" ..
-        "Use the replace_in_file tool to resolve the conflict by replacing the content between conflict markers with the resolved code.\n" ..
-        "DO NOT use git commands directly to edit files. Don't use bash commands to edit files. Instead, use the replace_in_file tool, or similar tools, to modify the file.\n" ..
-        "Use git_status instead of running a bash command to check the current git status.\n" ..
-        "After resolving conflicts with replace_in_file, use git_add to stage the resolved file.\n" ..
-        "CRITICAL SAFETY INSTRUCTIONS:\n" ..
-        "1. Do not modify binary files\n" ..
-        "2. Preserve original code structure and intent\n" ..
-        "3. Minimize changes\n" ..
-        "4. Avoid introducing new syntax errors\n" ..
-        "5. Maintain existing code style and formatting\n" ..
-        "6. DO NOT invoke any interactive tools or editors",
+        "# Git Conflict Resolution Task\n\n" ..
+        "## File Information\n" ..
+        "- File path: %s\n" ..
+        "- This file contains git merge conflicts that must be resolved\n\n" ..
+        "## Conflict File Content\n\n```\n%s\n```\n\n" ..
+        "## CRITICAL RESOLUTION REQUIREMENTS\n\n" ..
+        "1. **REMOVE ALL CONFLICT MARKERS COMPLETELY**:\n" ..
+        "   - Remove ALL instances of `<<<<<<<`, `=======`, and `>>>>>>>` markers\n" ..
+        "   - A file with ANY remaining conflict markers is considered UNRESOLVED\n" ..
+        "   - ALWAYS verify the final content has NO conflict markers before completing\n\n" ..
+        "2. **PRESERVE FUNCTIONALITY FROM BOTH VERSIONS**:\n" ..
+        "   - Carefully analyze the semantic meaning of both HEAD and incoming changes\n" ..
+        "   - Prioritize preserving functionality over preserving exact code structure\n" ..
+        "   - When in doubt, include logic from both versions unless they directly contradict\n" ..
+        "   - Ensure all variables, functions, and logic paths from both sides are preserved\n\n" ..
+        "3. **RESOLUTION STRATEGY**:\n" ..
+        "   - For simple conflicts (formatting, comments, minor changes), use the more comprehensive version\n" ..
+        "   - For complex conflicts, merge functionality from both versions\n" ..
+        "   - For conflicting functionality, prefer the approach that is more consistent with surrounding code\n" ..
+        "   - For variable/function name conflicts, use the most descriptive name and update references\n\n" ..
+        "## REQUIRED WORKFLOW\n\n" ..
+        "1. First, carefully analyze the conflict by identifying:\n" ..
+        "   - What changed between versions\n" ..
+        "   - The intent behind each change\n" ..
+        "   - How the changes relate to surrounding code\n\n" ..
+        "2. Develop a clear resolution strategy before making changes\n\n" ..
+        "3. Use ONLY the replace_in_file tool to implement your resolution\n\n" ..
+        "4. VERIFY your changes:\n" ..
+        "   - Confirm ALL conflict markers are removed\n" ..
+        "   - Ensure code is syntactically valid\n" ..
+        "   - Check that functionality from both versions is preserved\n" ..
+        "   - Verify the code will compile/run without errors\n\n" ..
+        "5. EXPLICITLY VERIFY the file is completely resolved using the view tool\n" ..
+        "   - Scan the entire file to ensure NO conflict markers remain\n" ..
+        "   - Check for syntax errors or inconsistencies\n\n" ..
+        "## TOOL USAGE REQUIREMENTS\n\n" ..
+        "- DO NOT use git commands directly to edit files\n" ..
+        "- DO NOT use bash commands to edit files\n" ..
+        "- Use ONLY the replace_in_file tool for making changes\n" ..
+        "- Use the view tool to verify your changes\n" ..
+        "- DO NOT invoke any interactive tools or editors\n\n" ..
+        "## SAFETY CONSTRAINTS\n\n" ..
+        "- Maintain existing code style (indentation, spacing, naming conventions)\n" ..
+        "- Preserve comments when possible\n" ..
+        "- Do not add new features or functionality\n" ..
+        "- Do not remove functionality unless it's explicitly replaced\n" ..
+        "- Ensure the final code is syntactically correct\n\n" ..
+        "## FINAL VERIFICATION CHECKLIST\n\n" ..
+        "Before considering the task complete, verify:\n" ..
+        "1. ALL conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) are completely removed\n" ..
+        "2. The code is syntactically valid and would compile/run\n" ..
+        "3. All functionality from both versions is preserved\n" ..
+        "4. The code style matches the surrounding code\n\n" ..
+        "After you completely resolve all conflicts, I will manually stage the file for you. DO NOT attempt to stage the file yourself.",
         conflict_file,
         file_content_str:sub(1, 4000) -- Limit size to avoid token issues
       )
@@ -562,14 +602,93 @@ local function resolve_conflicts(context, opts, callback)
             error = err
           })
         else
-          -- Apply the resolution with safety checks
-          local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
+          -- Log staging attempt
+          log_rebase_update(context, {
+            stage = "resolving_conflicts",
+            details = string.format("Staging resolved file: %s", conflict_file),
+            progress = 80,
+            files = { conflict_file }
+          })
 
-          if vim.v.shell_error ~= 0 then
+          -- Verify file exists before staging
+          if vim.fn.filereadable(conflict_file) ~= 1 then
+            local error_msg = string.format("Cannot stage file: %s does not exist or is not readable", conflict_file)
             table.insert(resolution_errors, {
               file = conflict_file,
-              error = "Failed to stage resolved file: " .. apply_result
+              error = error_msg
             })
+
+            log_rebase_update(context, {
+              stage = "resolving_conflicts",
+              details = "Staging failed - file not readable",
+              progress = 85,
+              errors = { error_msg }
+            })
+          else
+            -- Verify no conflict markers remain
+            local file_content = vim.fn.readfile(conflict_file)
+            local file_content_str = table.concat(file_content, "\n")
+
+            if file_content_str:match("<<<<<<< HEAD") or
+               file_content_str:match("=======") or
+               file_content_str:match(">>>>>>>") then
+
+              local error_msg = "Conflict markers still present in resolved file"
+              table.insert(resolution_errors, {
+                file = conflict_file,
+                error = error_msg
+              })
+
+              log_rebase_update(context, {
+                stage = "resolving_conflicts",
+                details = "Staging failed - conflict markers remain",
+                progress = 85,
+                errors = { error_msg }
+              })
+            else
+              -- Apply the resolution with safety checks
+              local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
+
+              if vim.v.shell_error ~= 0 then
+                local error_msg = "Failed to stage resolved file: " .. apply_result
+                table.insert(resolution_errors, {
+                  file = conflict_file,
+                  error = error_msg
+                })
+
+                log_rebase_update(context, {
+                  stage = "resolving_conflicts",
+                  details = "Git add command failed",
+                  progress = 85,
+                  errors = { error_msg }
+                })
+              else
+                -- Verify file was actually staged
+                local staged_status = vim.fn.system(string.format("git status --porcelain %q", conflict_file))
+
+                if not staged_status:match("^M") and not staged_status:match("^A") then
+                  local error_msg = "File was not properly staged despite successful git add"
+                  table.insert(resolution_errors, {
+                    file = conflict_file,
+                    error = error_msg
+                  })
+
+                  log_rebase_update(context, {
+                    stage = "resolving_conflicts",
+                    details = "Staging verification failed",
+                    progress = 85,
+                    errors = { error_msg }
+                  })
+                else
+                  log_rebase_update(context, {
+                    stage = "resolving_conflicts",
+                    details = string.format("Successfully staged resolved file: %s", conflict_file),
+                    progress = 85,
+                    files = { conflict_file }
+                  })
+                end
+              end
+            end
           end
         end
 
