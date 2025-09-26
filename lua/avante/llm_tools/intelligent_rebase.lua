@@ -838,7 +838,7 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
         -- Use the verification agent to verify the resolution quality with our new extracted function
         verify_conflict_resolution(conflict_file, context, opts, function(is_valid, issues)
           handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, index, callback)
-        })
+        end)
 
         -- Don't proceed to the next file yet - the verification callback will handle that
         return
