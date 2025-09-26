@@ -191,7 +191,8 @@ local ToolValidator = {
   _forbidden_tools = {
     "dispatch_agent",     -- Prevent nested agent dispatching
     "dispatch_full_agent", -- Prevent recursive full agent launches
-    "nested_agent_executor" -- Prevent potential infinite recursion
+    "nested_agent_executor", -- Prevent potential infinite recursion
+    "intelligent_rebase"  -- Prevent recursive rebase operations
   },
 
   ---@brief Validate a tool for execution based on predefined constraints
