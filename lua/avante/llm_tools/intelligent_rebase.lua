@@ -25,6 +25,8 @@ local History = require("avante.history")
 ---@field on_state_change? fun(state: string): nil
 ---@field history_messages table[]
 ---@field current_state string
+---@field pending_operations integer Number of pending async operations
+---@field has_completed boolean Whether the final completion has been signaled
 
 ---@class AvanteLLMTool
 local M = setmetatable({}, Base)
@@ -115,6 +117,59 @@ M.returns = {
     optional = true,
   },
 }
+
+---@brief Track a new asynchronous operation
+---@param context IntelligentRebaseContext
+local function track_operation(context)
+  if not context then return end
+  context.pending_operations = (context.pending_operations or 0) + 1
+  if context.on_log then
+    pcall(context.on_log, {
+      type = "operation_tracking",
+      data = { action = "start", count = context.pending_operations }
+    })
+  end
+end
+
+---@brief Complete an asynchronous operation and check if all operations are complete
+---@param context IntelligentRebaseContext
+---@param on_complete function Optional callback to call when all operations are complete
+---@param success boolean Whether the operation was successful
+---@param error string|nil Error message if the operation failed
+local function complete_operation(context, on_complete, success, error)
+  if not context then return end
+
+  -- Decrement the pending operations counter
+  context.pending_operations = math.max(0, (context.pending_operations or 0) - 1)
+
+  if context.on_log then
+    pcall(context.on_log, {
+      type = "operation_tracking",
+      data = { action = "complete", count = context.pending_operations }
+    })
+  end
+
+  -- Check if all operations are complete and we haven't already signaled completion
+  if context.pending_operations == 0 and not context.has_completed and on_complete then
+    context.has_completed = true
+    pcall(on_complete, success, error)
+  end
+end
+
+---@brief Check if all operations are complete and signal completion if they are
+---@param context IntelligentRebaseContext
+---@param on_complete function Optional callback to call when all operations are complete
+---@param success boolean Whether the operation was successful
+---@param error string|nil Error message if the operation failed
+local function check_completion(context, on_complete, success, error)
+  if not context then return end
+
+  -- If there are no pending operations and we haven't already signaled completion
+  if context.pending_operations == 0 and not context.has_completed and on_complete then
+    context.has_completed = true
+    pcall(on_complete, success, error)
+  end
+end
 
 ---@brief Log rebase update with stage, details, and progress
 ---@param context IntelligentRebaseContext
@@ -468,6 +523,9 @@ local function resolve_conflicts(context, opts, callback)
       return process_next_conflict(index + 1)
     end
 
+    -- Track this operation as a pending asynchronous operation
+    track_operation(context)
+
     -- Use dispatch_full_agent to analyze and resolve conflicts
     require("avante.llm_tools.dispatch_full_agent").func({
       prompt = string.format(
@@ -514,6 +572,9 @@ local function resolve_conflicts(context, opts, callback)
             })
           end
         end
+
+        -- Complete this operation and decrement the pending operations counter
+        complete_operation(context, nil, err == nil, err)
 
         -- Process the next conflict file
         process_next_conflict(index + 1)
@@ -583,7 +644,9 @@ function M.func(input, opts)
       conflict_files = {},
       resolution_logs = {},
       initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", ""),
-      current_state = "continuing"
+      current_state = "continuing",
+      pending_operations = 0, -- Initialize pending operations counter
+      has_completed = false   -- Initialize completion flag
     }
 
     log_rebase_update(context, {
@@ -630,6 +693,9 @@ function M.func(input, opts)
         end)
       end
 
+        -- Mark as completed to prevent further operations
+        context.has_completed = true
+    
       -- Complete with error
       pcall(function()
         on_complete(is_success, error_str)
