@@ -557,10 +557,12 @@ local function safe_rollback(context)
 end
 
 ---@type AvanteLLMToolFunc<{ source_branch: string, target_branch: string, max_attempts?: integer }>
+---@note This function is fully asynchronous and requires on_complete callback for results
 function M.func(input, opts)
   opts = opts or {}
   local on_log = opts.on_log
-  local on_complete = opts.on_complete
+  -- Ensure on_complete is always a function, even if not provided
+  local on_complete = opts.on_complete or function() end
   local on_messages_add = opts.on_messages_add
   local on_state_change = opts.on_state_change
   local session_ctx = opts.session_ctx
@@ -629,13 +631,11 @@ function M.func(input, opts)
       end
 
       -- Complete with error
-      if on_complete then
-        pcall(function()
-          on_complete(is_success, error_str)
-        end)
-      end
+      pcall(function()
+        on_complete(is_success, error_str)
+      end)
 
-      return is_success, final_error
+      return -- Exit early but don't return values
     end
   end
 
@@ -772,21 +772,13 @@ function M.func(input, opts)
     end)
   end
 
-  -- If on_complete is provided, call it with the results
-  if on_complete then
-    -- Use pcall to handle potential errors
-    pcall(function()
-      on_complete(is_success, error_message)
-    end)
-  end
+  -- Always call on_complete with the results
+  -- on_complete is guaranteed to be a function (either provided or our default no-op)
+  pcall(function()
+    on_complete(is_success, final_error and error_message or nil)
+  end)
 
-  -- If on_complete is not provided, return the results directly
-  if not on_complete then
-    if final_error then
-      return is_success, final_error
-    end
-    return is_success, nil
-  end
+  -- No direct return values - fully asynchronous pattern
 end
 
 return M
