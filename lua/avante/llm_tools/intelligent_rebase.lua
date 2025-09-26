@@ -179,11 +179,20 @@ end
 ---@param max_attempts? integer
 ---@return IntelligentRebaseContext | nil, string | nil
 local function initialize_rebase(source_branch, target_branch, max_attempts)
+  -- Set default max_attempts if not provided or ensure it's a number
+  local max_attempts_value = 3
+  if max_attempts ~= nil then
+    if type(max_attempts) ~= "number" or max_attempts < 1 or max_attempts > 10 then
+      return nil, "Invalid max_attempts. Must be a number between 1 and 10."
+    end
+    max_attempts_value = max_attempts
+  end
+
   local context = {
     source_branch = sanitize_branch_name(source_branch),
     target_branch = sanitize_branch_name(target_branch),
     current_attempt = 0,
-    max_attempts = max_attempts or 3,
+    max_attempts = max_attempts_value,
     conflict_files = {},
     resolution_logs = {},
     initial_head = vim.fn.system("git rev-parse HEAD"):gsub("\n", ""),
@@ -203,11 +212,6 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
 
   if not target_branch or type(target_branch) ~= "string" or target_branch:match("^%s*$") then
     return nil, "Invalid target branch name. Must be a non-empty string."
-  end
-
-  -- Validate max attempts
-  if type(max_attempts) ~= "number" or max_attempts < 1 or max_attempts > 10 then
-    return nil, "Invalid max_attempts. Must be a number between 1 and 10."
   end
 
   -- Validate branches exist
@@ -281,11 +285,22 @@ local function detect_conflicts(context)
     progress = 50,
   })
 
+  -- Set GIT_EDITOR to prevent interactive editor sessions
+  local old_git_editor = vim.fn.getenv("GIT_EDITOR")
+  vim.fn.setenv("GIT_EDITOR", ":")
+
   -- Start the rebase process with enhanced error handling
   local rebase_result = vim.fn.system(string.format("git rebase %s %s 2>&1",
     context.target_branch,
     context.source_branch
   ))
+
+  -- Restore original GIT_EDITOR
+  if old_git_editor ~= "" then
+    vim.fn.setenv("GIT_EDITOR", old_git_editor)
+  else
+    vim.fn.unsetenv("GIT_EDITOR")
+  end
 
   -- Check if rebase encountered conflicts
   if vim.v.shell_error ~= 0 then
@@ -377,21 +392,41 @@ local function resolve_conflicts(context, opts)
       goto continue
     end
 
+    -- Read the conflict file content
+    local file_content = vim.fn.readfile(conflict_file)
+    local file_content_str = table.concat(file_content, "\n")
+
+    -- Check if the file actually has conflict markers
+    if not file_content_str:match("<<<<<<< HEAD") then
+      -- No conflict markers found, just stage the file as is
+      local stage_result = vim.fn.system(string.format("git add %q", conflict_file))
+      if vim.v.shell_error ~= 0 then
+        table.insert(resolution_errors, {
+          file = conflict_file,
+          error = "Failed to stage file without conflict markers: " .. stage_result
+        })
+      end
+      goto continue
+    end
+
     -- Use dispatch_full_agent to analyze and resolve conflicts
     local agent_result, agent_error = require("avante.llm_tools.dispatch_full_agent").func({
       prompt = string.format(
         "Analyze and resolve git merge conflict in file: %s\n" ..
+        "File content with conflict markers is shown below:\n\n%s\n\n" ..
         "Provide a resolution strategy that preserves code intent and minimizes changes.\n" ..
-        "Load and use tools like rag_search, web_search and git_add as required.\n" ..
-        "Prefer to use specialist tools like git_add rather than running a shell command.\n" ..
-        "Include reasoning and proposed code changes.\n" ..
+        "Use the replace_in_file tool to resolve the conflict by replacing the content between conflict markers with the resolved code.\n" ..
+        "DO NOT use git commands directly. Instead, use the replace_in_file tool to modify the file.\n" ..
+        "After resolving conflicts with replace_in_file, use git_add to stage the resolved file.\n" ..
         "CRITICAL SAFETY INSTRUCTIONS:\n" ..
         "1. Do not modify binary files\n" ..
         "2. Preserve original code structure and intent\n" ..
         "3. Minimize changes\n" ..
         "4. Avoid introducing new syntax errors\n" ..
-        "5. Maintain existing code style and formatting",
-        conflict_file
+        "5. Maintain existing code style and formatting\n" ..
+        "6. DO NOT invoke any interactive tools or editors",
+        conflict_file,
+        file_content_str:sub(1, 4000) -- Limit size to avoid token issues
       )
     }, {
       on_log = opts.on_log or function() end,
@@ -441,8 +476,19 @@ local function resolve_conflicts(context, opts)
     return false, "Some conflicts could not be resolved automatically"
   end
 
+  -- Set GIT_EDITOR to prevent interactive editor sessions
+  local old_git_editor = vim.fn.getenv("GIT_EDITOR")
+  vim.fn.setenv("GIT_EDITOR", ":")
+
   -- Continue the rebase with error handling
-  local continue_result = vim.fn.system("git rebase --continue")
+  local continue_result = vim.fn.system("git rebase --continue 2>&1")
+
+  -- Restore original GIT_EDITOR
+  if old_git_editor ~= "" then
+    vim.fn.setenv("GIT_EDITOR", old_git_editor)
+  else
+    vim.fn.unsetenv("GIT_EDITOR")
+  end
 
   if vim.v.shell_error ~= 0 then
     log_rebase_update(context, {
@@ -554,6 +600,10 @@ function M.func(input, opts)
   context.on_state_change = on_state_change
   context.history_messages = {}
 
+  -- Set GIT_EDITOR to prevent interactive editor sessions for all Git commands
+  local old_git_editor = vim.fn.getenv("GIT_EDITOR")
+  vim.fn.setenv("GIT_EDITOR", ":")
+
   -- Outer loop: Continue the rebase process
   while true do
     -- Attempt to continue the rebase
@@ -610,6 +660,13 @@ function M.func(input, opts)
   -- If rebase was not successful after all attempts, rollback
   if not is_success then
     safe_rollback(context)
+  end
+
+  -- Restore original GIT_EDITOR environment variable
+  if old_git_editor ~= "" then
+    vim.fn.setenv("GIT_EDITOR", old_git_editor)
+  else
+    vim.fn.unsetenv("GIT_EDITOR")
   end
 
   local final_history_messages = context.history_messages or {}
