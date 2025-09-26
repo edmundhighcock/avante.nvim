@@ -543,6 +543,152 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   })
 end
 
+---@brief Handle verification result from conflict resolution
+---@param is_valid boolean Whether the verification passed
+---@param issues table|nil Issues found during verification
+---@param conflict_file string Path to the file being verified
+---@param context IntelligentRebaseContext
+---@param opts table Optional configuration options
+---@param resolution_errors table Table to collect resolution errors
+---@param index integer Index of the conflict file being processed
+---@param callback fun(success: boolean, error: string | nil): nil Final callback
+local function handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, index, callback)
+  if not is_valid then
+    -- Resolution verification failed - create a more detailed error message
+    local conflict_markers_found = false
+    local duplicate_code_found = false
+    local other_issues = {}
+
+    -- Categorize issues for better reporting
+    if issues then
+      for _, issue in ipairs(issues) do
+        if issue:match("conflict marker") or issue:match("<<<<<<<") or issue:match("=======") or issue:match(">>>>>>>") then
+          conflict_markers_found = true
+        elseif issue:match("duplicate") or issue:match("repeated") then
+          duplicate_code_found = true
+        else
+          table.insert(other_issues, issue)
+        end
+      end
+    end
+
+    -- Create a detailed error message based on issue categories
+    local error_details = {}
+    if conflict_markers_found then
+      table.insert(error_details, "Conflict markers still present in file")
+    end
+    if duplicate_code_found then
+      table.insert(error_details, "Duplicate code found in resolution")
+    end
+    if #other_issues > 0 then
+      table.insert(error_details, "Other issues: " .. table.concat(other_issues, "; "))
+    end
+
+    local error_msg = "Resolution verification failed: " .. table.concat(error_details, ". ")
+
+    -- Log the detailed error
+    table.insert(resolution_errors, {
+      file = conflict_file,
+      error = error_msg,
+      issues = issues -- Store original issues for potential retry
+    })
+
+    -- Update with categorized errors for better user feedback
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = "Resolution verification failed - " ..
+                (conflict_markers_found and "conflict markers remain" or
+                 duplicate_code_found and "duplicate code detected" or
+                 "see issues for details"),
+      progress = 80,
+      errors = issues or {"Unknown verification issues"}
+    })
+
+    -- If we still have attempts left, try again with the same file
+    if context.current_attempt < context.max_attempts then
+      log_rebase_update(context, {
+        stage = "resolving_conflicts",
+        details = string.format("Retrying resolution for file: %s (failed verification)", conflict_file),
+        progress = 80,
+        errors = issues or {"Unknown verification issues"}
+      })
+
+      -- Complete this operation but don't move to next file yet
+      complete_operation(context, nil, false, error_msg)
+
+      -- Process the same file again (don't increment index)
+      return process_next_conflict(index, context, opts, resolution_errors, callback)
+    else
+      -- Max attempts reached for this file, log and move on
+      log_rebase_update(context, {
+        stage = "resolving_conflicts",
+        details = string.format("Maximum resolution attempts reached for file: %s", conflict_file),
+        progress = 80,
+        errors = {"Failed to resolve after maximum attempts"}
+      })
+
+      -- Complete this operation and move to next file
+      complete_operation(context, nil, false, error_msg)
+      return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+    end
+  else
+    -- Verification passed, proceed with staging
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = string.format("Verification passed, staging file: %s", conflict_file),
+      progress = 80,
+      files = { conflict_file }
+    })
+
+    -- Apply the resolution with safety checks
+    local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
+
+    if vim.v.shell_error ~= 0 then
+      local error_msg = "Failed to stage resolved file: " .. apply_result
+      table.insert(resolution_errors, {
+        file = conflict_file,
+        error = error_msg
+      })
+
+      log_rebase_update(context, {
+        stage = "resolving_conflicts",
+        details = "Git add command failed",
+        progress = 85,
+        errors = { error_msg }
+      })
+    else
+      -- Verify file was actually staged
+      local staged_status = vim.fn.system(string.format("git status --porcelain %q", conflict_file))
+
+      if not staged_status:match("^M") and not staged_status:match("^A") then
+        local error_msg = "File was not properly staged despite successful git add"
+        table.insert(resolution_errors, {
+          file = conflict_file,
+          error = error_msg
+        })
+
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = "Staging verification failed",
+          progress = 85,
+          errors = { error_msg }
+        })
+      else
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = string.format("Successfully verified and staged resolved file: %s", conflict_file),
+          progress = 85,
+          files = { conflict_file }
+        })
+      end
+    end
+
+    -- Complete this operation and move to next file
+    complete_operation(context, nil, true, nil)
+    return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+  end
+end
+
 ---@brief Process a single conflict file
 ---@param index integer Index of the conflict file to process
 ---@param context IntelligentRebaseContext
@@ -689,142 +835,9 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
           return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
         end
 
-        -- Use the verification agent to verify the resolution quality
+        -- Use the verification agent to verify the resolution quality with our new extracted function
         verify_conflict_resolution(conflict_file, context, opts, function(is_valid, issues)
-          if not is_valid then
-            -- Resolution verification failed - create a more detailed error message
-            local conflict_markers_found = false
-            local duplicate_code_found = false
-            local other_issues = {}
-
-            -- Categorize issues for better reporting
-            if issues then
-              for _, issue in ipairs(issues) do
-                if issue:match("conflict marker") or issue:match("<<<<<<<") or issue:match("=======") or issue:match(">>>>>>>") then
-                  conflict_markers_found = true
-                elseif issue:match("duplicate") or issue:match("repeated") then
-                  duplicate_code_found = true
-                else
-                  table.insert(other_issues, issue)
-                end
-              end
-            end
-
-            -- Create a detailed error message based on issue categories
-            local error_details = {}
-            if conflict_markers_found then
-              table.insert(error_details, "Conflict markers still present in file")
-            end
-            if duplicate_code_found then
-              table.insert(error_details, "Duplicate code found in resolution")
-            end
-            if #other_issues > 0 then
-              table.insert(error_details, "Other issues: " .. table.concat(other_issues, "; "))
-            end
-
-            local error_msg = "Resolution verification failed: " .. table.concat(error_details, ". ")
-
-            -- Log the detailed error
-            table.insert(resolution_errors, {
-              file = conflict_file,
-              error = error_msg,
-              issues = issues -- Store original issues for potential retry
-            })
-
-            -- Update with categorized errors for better user feedback
-            log_rebase_update(context, {
-              stage = "resolving_conflicts",
-              details = "Resolution verification failed - " ..
-                        (conflict_markers_found and "conflict markers remain" or
-                         duplicate_code_found and "duplicate code detected" or
-                         "see issues for details"),
-              progress = 80,
-              errors = issues or {"Unknown verification issues"}
-            })
-
-            -- If we still have attempts left, try again with the same file
-            if context.current_attempt < context.max_attempts then
-              log_rebase_update(context, {
-                stage = "resolving_conflicts",
-                details = string.format("Retrying resolution for file: %s (failed verification)", conflict_file),
-                progress = 80,
-                errors = issues or {"Unknown verification issues"}
-              })
-
-              -- Complete this operation but don't move to next file yet
-              complete_operation(context, nil, false, error_msg)
-
-              -- Process the same file again (don't increment index)
-              return process_next_conflict(index, context, opts, resolution_errors, callback)
-            else
-              -- Max attempts reached for this file, log and move on
-              log_rebase_update(context, {
-                stage = "resolving_conflicts",
-                details = string.format("Maximum resolution attempts reached for file: %s", conflict_file),
-                progress = 80,
-                errors = {"Failed to resolve after maximum attempts"}
-              })
-
-              -- Complete this operation and move to next file
-              complete_operation(context, nil, false, error_msg)
-              return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
-            end
-          else
-            -- Verification passed, proceed with staging
-            log_rebase_update(context, {
-              stage = "resolving_conflicts",
-              details = string.format("Verification passed, staging file: %s", conflict_file),
-              progress = 80,
-              files = { conflict_file }
-            })
-
-            -- Apply the resolution with safety checks
-            local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
-
-            if vim.v.shell_error ~= 0 then
-              local error_msg = "Failed to stage resolved file: " .. apply_result
-              table.insert(resolution_errors, {
-                file = conflict_file,
-                error = error_msg
-              })
-
-              log_rebase_update(context, {
-                stage = "resolving_conflicts",
-                details = "Git add command failed",
-                progress = 85,
-                errors = { error_msg }
-              })
-            else
-              -- Verify file was actually staged
-              local staged_status = vim.fn.system(string.format("git status --porcelain %q", conflict_file))
-
-              if not staged_status:match("^M") and not staged_status:match("^A") then
-                local error_msg = "File was not properly staged despite successful git add"
-                table.insert(resolution_errors, {
-                  file = conflict_file,
-                  error = error_msg
-                })
-
-                log_rebase_update(context, {
-                  stage = "resolving_conflicts",
-                  details = "Staging verification failed",
-                  progress = 85,
-                  errors = { error_msg }
-                })
-              else
-                log_rebase_update(context, {
-                  stage = "resolving_conflicts",
-                  details = string.format("Successfully verified and staged resolved file: %s", conflict_file),
-                  progress = 85,
-                  files = { conflict_file }
-                })
-              end
-            end
-
-            -- Complete this operation and move to next file
-            complete_operation(context, nil, true, nil)
-            return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
-          end
+          handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, index, callback)
         })
 
         -- Don't proceed to the next file yet - the verification callback will handle that
@@ -981,30 +994,6 @@ local function finalize_rebase(context, success, error, old_git_editor, is_succe
   end)
 end
 
----@brief Attempt to resolve conflicts during rebase
----@param context IntelligentRebaseContext The rebase context
----@param opts table Options for the resolution
----@param callback fun(success: boolean, error: string|nil): nil Callback to be called when resolution completes
-local function attempt_resolution(context, opts, callback)
-  -- Use resolve_conflicts with a callback
-  resolve_conflicts(context, opts, function(resolution_success, resolution_err)
-    if resolution_success then
-      -- If resolution was successful, continue the rebase process
-      continue_rebase_process(context, opts)
-    else
-      -- Check if we've reached max attempts
-      if context.current_attempt >= context.max_attempts then
-        -- Report completion with failure
-        context.finalize_rebase(false, resolution_err or "Failed to resolve conflicts")
-      else
-        -- Try again with the next attempt
-        -- resolve_conflicts will increment the attempt counter
-        attempt_resolution(context, opts, callback)
-      end
-    end
-  end)
-end
-
 ---@brief Continue the rebase process after resolving conflicts
 ---@param context IntelligentRebaseContext The rebase context
 ---@param opts table Options for the rebase process
@@ -1032,6 +1021,29 @@ local function continue_rebase_process(context, opts)
 
   -- Start the resolution process
   attempt_resolution(context, opts)
+end
+
+---@brief Attempt to resolve conflicts during rebase
+---@param context IntelligentRebaseContext The rebase context
+---@param opts table Options for the resolution
+local function attempt_resolution(context, opts)
+  -- Use resolve_conflicts with a callback
+  resolve_conflicts(context, opts, function(resolution_success, resolution_err)
+    if resolution_success then
+      -- If resolution was successful, continue the rebase process
+      continue_rebase_process(context, opts)
+    else
+      -- Check if we've reached max attempts
+      if context.current_attempt >= context.max_attempts then
+        -- Report completion with failure
+        context.finalize_rebase(false, resolution_err or "Failed to resolve conflicts")
+      else
+        -- Try again with the next attempt
+        -- resolve_conflicts will increment the attempt counter
+        attempt_resolution(context, opts)
+      end
+    end
+  end)
 end
 
 ---@type AvanteLLMToolFunc<{ source_branch: string, target_branch: string, max_attempts?: integer }>
