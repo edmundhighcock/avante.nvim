@@ -1396,6 +1396,7 @@ function M.process_tool_use(tools, tool_use, opts)
       if Helpers.is_cancelled then return end
       if on_log then on_log(tool_use.id, tool_use.name, log, "running") end
     end,
+    on_messages_add = opts.on_messages_add, -- Explicitly pass on_messages_add
     set_store = function(key, value)
       if opts.set_tool_use_store then opts.set_tool_use_store(tool_use.id, key, value) end
     end,

@@ -119,44 +119,37 @@ local function log_rebase_update(context, update)
     errors = update.errors or {}
   })
 
+  -- Prepare a detailed, user-friendly message with emoji and clear formatting
+  local message_content = string.format(
+    "🔄 Intelligent Rebase Update\n- Stage: %s\n- Details: %s\n- Progress: %d%%\n%s",
+    update.stage,
+    update.details,
+    update.progress,
+    update.errors and #update.errors > 0 and "- Errors: " .. table.concat(update.errors, ", ") or ""
+  )
+
+  -- Always create a history message to ensure sidebar updates
+  local history_message = History.Message:new("assistant", message_content, {
+    just_for_display = true,
+    state = update.stage
+  })
+
   -- Notify via on_log callback for real-time updates
   if context.on_log then
     context.on_log({
       type = "rebase_update",
       data = update
     })
+  end
 
-    -- Create a history message for significant stages
-    local history_message_stages = {
-      "initializing",
-      "detecting_conflicts",
-      "resolving_conflicts",
-      "rollback"
-    }
+  -- Manage history messages and trigger sidebar updates
+  if context.history_messages then
+    table.insert(context.history_messages, history_message)
+  end
 
-    if vim.tbl_contains(history_message_stages, update.stage) then
-      local message_content = string.format(
-        "Rebase Stage: %s\nDetails: %s\nProgress: %d%%\n%s",
-        update.stage,
-        update.details,
-        update.progress,
-        update.errors and #update.errors > 0 and "Errors: " .. table.concat(update.errors, ", ") or ""
-      )
-
-      local history_message = History.Message:new("assistant", message_content, {
-        just_for_display = true,
-        state = update.stage
-      })
-
-      if context.history_messages then
-        table.insert(context.history_messages, history_message)
-      end
-
-      -- Support on_messages_add callback for incremental history updates
-      if context.on_messages_add then
-        context.on_messages_add({ history_message })
-      end
-    end
+  -- Support on_messages_add callback for incremental history updates
+  if context.on_messages_add then
+    context.on_messages_add({ history_message })
   end
 end
 
