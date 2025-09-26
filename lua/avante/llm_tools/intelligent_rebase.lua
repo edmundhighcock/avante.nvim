@@ -241,6 +241,34 @@ local function sanitize_branch_name(branch)
   return branch:gsub("[^a-zA-Z0-9_/-]", "")
 end
 
+---@brief Check if a branch exists
+---@param branch string Name of the branch to check
+---@return boolean
+local function check_branch_exists(branch)
+  local sanitized = sanitize_branch_name(branch)
+  local result = vim.fn.system(string.format("git rev-parse --verify %q 2>/dev/null", sanitized))
+  return vim.v.shell_error == 0
+end
+
+---@brief Check for non-empty tracked changes in the repository
+---@return boolean
+local function check_non_empty_tracked_changes()
+  local status_output = vim.fn.systemlist("git status --porcelain")
+  for _, line in ipairs(status_output) do
+    -- Ignore untracked directories or files
+    if not line:match("^%?%?") then
+      -- Check if the change is not just an empty directory
+      local file = line:match("^%s*[AMDR]%s+(.+)$")
+      if file then
+        if not file:match("/$") then  -- Not an empty directory
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 ---@brief Validate input branches and check for uncommitted changes
 ---@param source_branch string
 ---@param target_branch string
@@ -282,41 +310,18 @@ local function initialize_rebase(source_branch, target_branch, max_attempts)
     return nil, "Invalid target branch name. Must be a non-empty string."
   end
 
-  -- Validate branches exist
-  local function branch_exists(branch)
-    local sanitized = sanitize_branch_name(branch)
-    local result = vim.fn.system(string.format("git rev-parse --verify %q 2>/dev/null", sanitized))
-    return vim.v.shell_error == 0
-  end
+  -- Use the module-level functions for validation
 
-  if not branch_exists(context.source_branch) then
+  if not check_branch_exists(context.source_branch) then
     return nil, string.format("Source branch '%s' does not exist", context.source_branch)
   end
 
-  if not branch_exists(context.target_branch) then
+  if not check_branch_exists(context.target_branch) then
     return nil, string.format("Target branch '%s' does not exist", context.target_branch)
   end
 
-  -- Check for non-empty tracked changes
-  local function has_non_empty_tracked_changes()
-    local status_output = vim.fn.systemlist("git status --porcelain")
-    for _, line in ipairs(status_output) do
-      -- Ignore untracked directories or files
-      if not line:match("^%?%?") then
-        -- Check if the change is not just an empty directory
-        local file = line:match("^%s*[AMDR]%s+(.+)$")
-        if file then
-          if not file:match("/$") then  -- Not an empty directory
-            return true
-          end
-        end
-      end
-    end
-    return false
-  end
-
   -- Check for uncommitted changes, but allow empty directory changes
-  if has_non_empty_tracked_changes() then
+  if check_non_empty_tracked_changes() then
     return nil, "Uncommitted changes exist. Please commit or stash changes before rebasing."
   end
 
@@ -518,6 +523,11 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   -- Use a separate verification agent to verify the resolution
   local Utils = require("avante.utils")
 
+  -- Create a dedicated function for verification completion
+  local function on_verification_complete(result, err)
+    handle_verification_complete(result, err, context, conflict_file, opts, verification_callback)
+  end
+
   require("avante.llm_tools.dispatch_full_agent").func({
     prompt = Utils.read_template("_conflict-verification.avanterules", {
       conflict_file = conflict_file,
@@ -525,8 +535,307 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
     })
   }, {
     on_log = opts.on_log or function() end,
+    on_complete = on_verification_complete,
+    session_ctx = opts.session_ctx or {},
+    store = {
+      messages = {}
+    }
+  })
+end
+
+---@brief Process a single conflict file
+---@param index integer Index of the conflict file to process
+---@param context IntelligentRebaseContext
+---@param opts table Optional configuration options
+---@param resolution_errors table Table to collect resolution errors
+---@param callback fun(success: boolean, error: string | nil): nil Final callback
+local function process_next_conflict(index, context, opts, resolution_errors, callback)
+  -- Check if we've processed all conflicts
+  if index > #context.conflict_files then
+    -- All conflicts processed, check for errors
+    if #resolution_errors > 0 then
+      log_rebase_update(context, {
+        stage = "resolving_conflicts",
+        details = string.format("Partial resolution failure (%d errors)", #resolution_errors),
+        progress = 90,
+        errors = vim.tbl_map(function(err) return err.error end, resolution_errors)
+      })
+      return callback(false, "Some conflicts could not be resolved automatically")
+    end
+
+    -- Set GIT_EDITOR to prevent interactive editor sessions
+    local old_git_editor = vim.fn.getenv("GIT_EDITOR")
+    vim.fn.setenv("GIT_EDITOR", ":")
+
+    -- Continue the rebase with error handling
+    local continue_result = vim.fn.system("git rebase --continue 2>&1")
+
+    -- Restore original GIT_EDITOR
+    if old_git_editor ~= "" then
+      vim.fn.setenv("GIT_EDITOR", old_git_editor)
+    else
+      vim.fn.unsetenv("GIT_EDITOR")
+    end
+
+    if vim.v.shell_error ~= 0 then
+      log_rebase_update(context, {
+        stage = "resolving_conflicts",
+        details = "Failed to continue rebase",
+        progress = 100,
+        errors = { continue_result }
+      })
+      return callback(false, "Failed to continue rebase: " .. continue_result)
+    end
+
+    log_rebase_update(context, {
+      stage = "resolving_conflicts",
+      details = string.format("Successfully resolved conflicts (Attempt %d)", context.current_attempt),
+      progress = 100
+    })
+
+    return callback(true, nil)
+  end
+
+  -- Get the current conflict file to process
+  local conflict_file = context.conflict_files[index]
+
+  log_rebase_update(context, {
+    stage = "resolving_conflicts",
+    details = string.format("Analyzing conflict in file: %s", conflict_file),
+    progress = 50,
+    files = { conflict_file }
+  })
+
+  -- Validate file before attempting resolution
+  if not vim.fn.filereadable(conflict_file) then
+    table.insert(resolution_errors, {
+      file = conflict_file,
+      error = "File is not readable"
+    })
+    -- Process the next conflict file
+    return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+  end
+
+  -- Read the conflict file content
+  local file_content = vim.fn.readfile(conflict_file)
+  local file_content_str = table.concat(file_content, "\n")
+
+  -- Check if the file actually has conflict markers
+  if not file_content_str:match("<<<<<<< HEAD") then
+    -- No conflict markers found, just stage the file as is
+    local stage_result = vim.fn.system(string.format("git add %q", conflict_file))
+    if vim.v.shell_error ~= 0 then
+      table.insert(resolution_errors, {
+        file = conflict_file,
+        error = "Failed to stage file without conflict markers: " .. stage_result
+      })
+    end
+    -- Process the next conflict file
+    return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+  end
+
+  -- Track this operation as a pending asynchronous operation
+  track_operation(context)
+
+  local Utils = require("avante.utils")
+
+  -- Use dispatch_full_agent to analyze and resolve conflicts
+  require("avante.llm_tools.dispatch_full_agent").func({
+    prompt = Utils.read_template("_conflict-resolution.avanterules", {
+      conflict_file = conflict_file,
+      file_content_str = file_content_str:sub(1, 4000), -- Limit size to avoid token issues
+    })
+  }, {
+    on_log = opts.on_log or function() end,
     on_complete = function(result, err)
-      handle_verification_complete(result, err, context, conflict_file, opts, verification_callback)
+      if err then
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = string.format("Agent resolution failed for file: %s", conflict_file),
+          progress = 75,
+          errors = { err }
+        })
+
+        table.insert(resolution_errors, {
+          file = conflict_file,
+          error = err
+        })
+      else
+        -- Log resolution completion
+        log_rebase_update(context, {
+          stage = "resolving_conflicts",
+          details = string.format("Resolution completed for file: %s, verifying quality", conflict_file),
+          progress = 75,
+          files = { conflict_file }
+        })
+
+        -- Verify file exists before verification
+        if vim.fn.filereadable(conflict_file) ~= 1 then
+          local error_msg = string.format("Cannot verify file: %s does not exist or is not readable", conflict_file)
+          table.insert(resolution_errors, {
+            file = conflict_file,
+            error = error_msg
+          })
+
+          log_rebase_update(context, {
+            stage = "resolving_conflicts",
+            details = "Verification failed - file not readable",
+            progress = 80,
+            errors = { error_msg }
+          })
+
+          -- Complete this operation and move to next file
+          complete_operation(context, nil, false, error_msg)
+          return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+        end
+
+        -- Use the verification agent to verify the resolution quality
+        verify_conflict_resolution(conflict_file, context, opts, function(is_valid, issues)
+          if not is_valid then
+            -- Resolution verification failed - create a more detailed error message
+            local conflict_markers_found = false
+            local duplicate_code_found = false
+            local other_issues = {}
+
+            -- Categorize issues for better reporting
+            if issues then
+              for _, issue in ipairs(issues) do
+                if issue:match("conflict marker") or issue:match("<<<<<<<") or issue:match("=======") or issue:match(">>>>>>>") then
+                  conflict_markers_found = true
+                elseif issue:match("duplicate") or issue:match("repeated") then
+                  duplicate_code_found = true
+                else
+                  table.insert(other_issues, issue)
+                end
+              end
+            end
+
+            -- Create a detailed error message based on issue categories
+            local error_details = {}
+            if conflict_markers_found then
+              table.insert(error_details, "Conflict markers still present in file")
+            end
+            if duplicate_code_found then
+              table.insert(error_details, "Duplicate code found in resolution")
+            end
+            if #other_issues > 0 then
+              table.insert(error_details, "Other issues: " .. table.concat(other_issues, "; "))
+            end
+
+            local error_msg = "Resolution verification failed: " .. table.concat(error_details, ". ")
+
+            -- Log the detailed error
+            table.insert(resolution_errors, {
+              file = conflict_file,
+              error = error_msg,
+              issues = issues -- Store original issues for potential retry
+            })
+
+            -- Update with categorized errors for better user feedback
+            log_rebase_update(context, {
+              stage = "resolving_conflicts",
+              details = "Resolution verification failed - " ..
+                        (conflict_markers_found and "conflict markers remain" or
+                         duplicate_code_found and "duplicate code detected" or
+                         "see issues for details"),
+              progress = 80,
+              errors = issues or {"Unknown verification issues"}
+            })
+
+            -- If we still have attempts left, try again with the same file
+            if context.current_attempt < context.max_attempts then
+              log_rebase_update(context, {
+                stage = "resolving_conflicts",
+                details = string.format("Retrying resolution for file: %s (failed verification)", conflict_file),
+                progress = 80,
+                errors = issues or {"Unknown verification issues"}
+              })
+
+              -- Complete this operation but don't move to next file yet
+              complete_operation(context, nil, false, error_msg)
+
+              -- Process the same file again (don't increment index)
+              return process_next_conflict(index, context, opts, resolution_errors, callback)
+            else
+              -- Max attempts reached for this file, log and move on
+              log_rebase_update(context, {
+                stage = "resolving_conflicts",
+                details = string.format("Maximum resolution attempts reached for file: %s", conflict_file),
+                progress = 80,
+                errors = {"Failed to resolve after maximum attempts"}
+              })
+
+              -- Complete this operation and move to next file
+              complete_operation(context, nil, false, error_msg)
+              return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+            end
+          else
+            -- Verification passed, proceed with staging
+            log_rebase_update(context, {
+              stage = "resolving_conflicts",
+              details = string.format("Verification passed, staging file: %s", conflict_file),
+              progress = 80,
+              files = { conflict_file }
+            })
+
+            -- Apply the resolution with safety checks
+            local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
+
+            if vim.v.shell_error ~= 0 then
+              local error_msg = "Failed to stage resolved file: " .. apply_result
+              table.insert(resolution_errors, {
+                file = conflict_file,
+                error = error_msg
+              })
+
+              log_rebase_update(context, {
+                stage = "resolving_conflicts",
+                details = "Git add command failed",
+                progress = 85,
+                errors = { error_msg }
+              })
+            else
+              -- Verify file was actually staged
+              local staged_status = vim.fn.system(string.format("git status --porcelain %q", conflict_file))
+
+              if not staged_status:match("^M") and not staged_status:match("^A") then
+                local error_msg = "File was not properly staged despite successful git add"
+                table.insert(resolution_errors, {
+                  file = conflict_file,
+                  error = error_msg
+                })
+
+                log_rebase_update(context, {
+                  stage = "resolving_conflicts",
+                  details = "Staging verification failed",
+                  progress = 85,
+                  errors = { error_msg }
+                })
+              else
+                log_rebase_update(context, {
+                  stage = "resolving_conflicts",
+                  details = string.format("Successfully verified and staged resolved file: %s", conflict_file),
+                  progress = 85,
+                  files = { conflict_file }
+                })
+              end
+            end
+
+            -- Complete this operation and move to next file
+            complete_operation(context, nil, true, nil)
+            return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+          end
+        })
+
+        -- Don't proceed to the next file yet - the verification callback will handle that
+        return
+      end
+
+      -- Complete this operation and decrement the pending operations counter
+      complete_operation(context, nil, err == nil, err)
+
+      -- Process the next conflict file
+      process_next_conflict(index + 1, context, opts, resolution_errors, callback)
     end,
     session_ctx = opts.session_ctx or {},
     store = {
@@ -561,304 +870,8 @@ local function resolve_conflicts(context, opts, callback)
 
   local resolution_errors = {}
 
-  -- Process conflict files sequentially
-  local function process_next_conflict(index)
-    -- Check if we've processed all conflicts
-    if index > #context.conflict_files then
-      -- All conflicts processed, check for errors
-      if #resolution_errors > 0 then
-        log_rebase_update(context, {
-          stage = "resolving_conflicts",
-          details = string.format("Partial resolution failure (%d errors)", #resolution_errors),
-          progress = 90,
-          errors = vim.tbl_map(function(err) return err.error end, resolution_errors)
-        })
-        return callback(false, "Some conflicts could not be resolved automatically")
-      end
-
-      -- Set GIT_EDITOR to prevent interactive editor sessions
-      local old_git_editor = vim.fn.getenv("GIT_EDITOR")
-      vim.fn.setenv("GIT_EDITOR", ":")
-
-      -- Continue the rebase with error handling
-      local continue_result = vim.fn.system("git rebase --continue 2>&1")
-
-      -- Restore original GIT_EDITOR
-      if old_git_editor ~= "" then
-        vim.fn.setenv("GIT_EDITOR", old_git_editor)
-      else
-        vim.fn.unsetenv("GIT_EDITOR")
-      end
-
-      if vim.v.shell_error ~= 0 then
-        log_rebase_update(context, {
-          stage = "resolving_conflicts",
-          details = "Failed to continue rebase",
-          progress = 100,
-          errors = { continue_result }
-        })
-        return callback(false, "Failed to continue rebase: " .. continue_result)
-      end
-
-      log_rebase_update(context, {
-        stage = "resolving_conflicts",
-        details = string.format("Successfully resolved conflicts (Attempt %d)", context.current_attempt),
-        progress = 100
-      })
-
-      return callback(true, nil)
-    end
-
-    -- Get the current conflict file to process
-    local conflict_file = context.conflict_files[index]
-
-    log_rebase_update(context, {
-      stage = "resolving_conflicts",
-      details = string.format("Analyzing conflict in file: %s", conflict_file),
-      progress = 50,
-      files = { conflict_file }
-    })
-
-    -- Validate file before attempting resolution
-    if not vim.fn.filereadable(conflict_file) then
-      table.insert(resolution_errors, {
-        file = conflict_file,
-        error = "File is not readable"
-      })
-      -- Process the next conflict file
-      return process_next_conflict(index + 1)
-    end
-
-    -- Read the conflict file content
-    local file_content = vim.fn.readfile(conflict_file)
-    local file_content_str = table.concat(file_content, "\n")
-
-    -- Check if the file actually has conflict markers
-    if not file_content_str:match("<<<<<<< HEAD") then
-      -- No conflict markers found, just stage the file as is
-      local stage_result = vim.fn.system(string.format("git add %q", conflict_file))
-      if vim.v.shell_error ~= 0 then
-        table.insert(resolution_errors, {
-          file = conflict_file,
-          error = "Failed to stage file without conflict markers: " .. stage_result
-        })
-      end
-      -- Process the next conflict file
-      return process_next_conflict(index + 1)
-    end
-
-    -- Track this operation as a pending asynchronous operation
-    track_operation(context)
-
-    local Utils = require("avante.utils")
-
-    -- Use dispatch_full_agent to analyze and resolve conflicts
-    require("avante.llm_tools.dispatch_full_agent").func({
-      prompt = Utils.read_template("_conflict-resolution.avanterules", {
-        conflict_file = conflict_file,
-        file_content_str = file_content_str:sub(1, 4000), -- Limit size to avoid token issues
-      })
-    }, {
-      on_log = opts.on_log or function() end,
-      on_complete = function(result, err)
-        if err then
-          log_rebase_update(context, {
-            stage = "resolving_conflicts",
-            details = string.format("Agent resolution failed for file: %s", conflict_file),
-            progress = 75,
-            errors = { err }
-          })
-
-          table.insert(resolution_errors, {
-            file = conflict_file,
-            error = err
-          })
-        else
-          -- Log resolution completion
-          log_rebase_update(context, {
-            stage = "resolving_conflicts",
-            details = string.format("Resolution completed for file: %s, verifying quality", conflict_file),
-            progress = 75,
-            files = { conflict_file }
-          })
-
-          -- Verify file exists before verification
-          if vim.fn.filereadable(conflict_file) ~= 1 then
-            local error_msg = string.format("Cannot verify file: %s does not exist or is not readable", conflict_file)
-            table.insert(resolution_errors, {
-              file = conflict_file,
-              error = error_msg
-            })
-
-            log_rebase_update(context, {
-              stage = "resolving_conflicts",
-              details = "Verification failed - file not readable",
-              progress = 80,
-              errors = { error_msg }
-            })
-
-            -- Complete this operation and move to next file
-            complete_operation(context, nil, false, error_msg)
-            return process_next_conflict(index + 1)
-          end
-
-          -- Use the verification agent to verify the resolution quality
-          verify_conflict_resolution(conflict_file, context, opts, function(is_valid, issues)
-            if not is_valid then
-              -- Resolution verification failed - create a more detailed error message
-              local conflict_markers_found = false
-              local duplicate_code_found = false
-              local other_issues = {}
-
-              -- Categorize issues for better reporting
-              if issues then
-                for _, issue in ipairs(issues) do
-                  if issue:match("conflict marker") or issue:match("<<<<<<<") or issue:match("=======") or issue:match(">>>>>>>") then
-                    conflict_markers_found = true
-                  elseif issue:match("duplicate") or issue:match("repeated") then
-                    duplicate_code_found = true
-                  else
-                    table.insert(other_issues, issue)
-                  end
-                end
-              end
-
-              -- Create a detailed error message based on issue categories
-              local error_details = {}
-              if conflict_markers_found then
-                table.insert(error_details, "Conflict markers still present in file")
-              end
-              if duplicate_code_found then
-                table.insert(error_details, "Duplicate code found in resolution")
-              end
-              if #other_issues > 0 then
-                table.insert(error_details, "Other issues: " .. table.concat(other_issues, "; "))
-              end
-
-              local error_msg = "Resolution verification failed: " .. table.concat(error_details, ". ")
-
-              -- Log the detailed error
-              table.insert(resolution_errors, {
-                file = conflict_file,
-                error = error_msg,
-                issues = issues -- Store original issues for potential retry
-              })
-
-              -- Update with categorized errors for better user feedback
-              log_rebase_update(context, {
-                stage = "resolving_conflicts",
-                details = "Resolution verification failed - " ..
-                          (conflict_markers_found and "conflict markers remain" or
-                           duplicate_code_found and "duplicate code detected" or
-                           "see issues for details"),
-                progress = 80,
-                errors = issues or {"Unknown verification issues"}
-              })
-
-              -- If we still have attempts left, try again with the same file
-              if context.current_attempt < context.max_attempts then
-                log_rebase_update(context, {
-                  stage = "resolving_conflicts",
-                  details = string.format("Retrying resolution for file: %s (failed verification)", conflict_file),
-                  progress = 80,
-                  errors = issues or {"Unknown verification issues"}
-                })
-
-                -- Complete this operation but don't move to next file yet
-                complete_operation(context, nil, false, error_msg)
-
-                -- Process the same file again (don't increment index)
-                return process_next_conflict(index)
-              else
-                -- Max attempts reached for this file, log and move on
-                log_rebase_update(context, {
-                  stage = "resolving_conflicts",
-                  details = string.format("Maximum resolution attempts reached for file: %s", conflict_file),
-                  progress = 80,
-                  errors = {"Failed to resolve after maximum attempts"}
-                })
-
-                -- Complete this operation and move to next file
-                complete_operation(context, nil, false, error_msg)
-                return process_next_conflict(index + 1)
-              end
-            else
-              -- Verification passed, proceed with staging
-              log_rebase_update(context, {
-                stage = "resolving_conflicts",
-                details = string.format("Verification passed, staging file: %s", conflict_file),
-                progress = 80,
-                files = { conflict_file }
-              })
-
-              -- Apply the resolution with safety checks
-              local apply_result = vim.fn.system(string.format("git add %q", conflict_file))
-
-              if vim.v.shell_error ~= 0 then
-                local error_msg = "Failed to stage resolved file: " .. apply_result
-                table.insert(resolution_errors, {
-                  file = conflict_file,
-                  error = error_msg
-                })
-
-                log_rebase_update(context, {
-                  stage = "resolving_conflicts",
-                  details = "Git add command failed",
-                  progress = 85,
-                  errors = { error_msg }
-                })
-              else
-                -- Verify file was actually staged
-                local staged_status = vim.fn.system(string.format("git status --porcelain %q", conflict_file))
-
-                if not staged_status:match("^M") and not staged_status:match("^A") then
-                  local error_msg = "File was not properly staged despite successful git add"
-                  table.insert(resolution_errors, {
-                    file = conflict_file,
-                    error = error_msg
-                  })
-
-                  log_rebase_update(context, {
-                    stage = "resolving_conflicts",
-                    details = "Staging verification failed",
-                    progress = 85,
-                    errors = { error_msg }
-                  })
-                else
-                  log_rebase_update(context, {
-                    stage = "resolving_conflicts",
-                    details = string.format("Successfully verified and staged resolved file: %s", conflict_file),
-                    progress = 85,
-                    files = { conflict_file }
-                  })
-                end
-              end
-
-              -- Complete this operation and move to next file
-              complete_operation(context, nil, true, nil)
-              return process_next_conflict(index + 1)
-            end
-          })
-
-          -- Don't proceed to the next file yet - the verification callback will handle that
-          return
-        end
-
-        -- Complete this operation and decrement the pending operations counter
-        complete_operation(context, nil, err == nil, err)
-
-        -- Process the next conflict file
-        process_next_conflict(index + 1)
-      end,
-      session_ctx = opts.session_ctx or {},
-      store = {
-        messages = {}
-      }
-    })
-  end
-
   -- Start processing the first conflict file
-  process_next_conflict(1)
+  process_next_conflict(1, context, opts, resolution_errors, callback)
 
   -- The function now uses callbacks, so we don't need this synchronous return.
   -- All completion logic is handled in the process_next_conflict function.
@@ -886,6 +899,139 @@ local function safe_rollback(context)
   })
 
   return vim.v.shell_error == 0
+end
+
+---@brief Handle final cleanup and completion of the rebase process
+---@param context IntelligentRebaseContext The rebase context
+---@param success boolean Whether the rebase was successful
+---@param error string|nil Error message if the rebase failed
+---@param old_git_editor string|nil Original GIT_EDITOR environment variable
+---@param is_success boolean Reference to the is_success variable in the main function
+---@param final_error any Reference to the final_error variable in the main function
+---@param resolution_logs table Reference to the resolution_logs variable in the main function
+---@param on_state_change function|nil Callback to update the state in the UI
+---@param on_messages_add function|nil Callback to add messages to the UI
+local function finalize_rebase(context, success, error, old_git_editor, is_success, final_error, resolution_logs, on_state_change, on_messages_add)
+  -- Only execute if we haven't already completed
+  if context.has_completed then return end
+
+  -- Mark as completed to prevent further calls
+  context.has_completed = true
+
+  -- Set the final results
+  is_success = success
+  final_error = error
+  resolution_logs = context.resolution_logs
+
+  -- If rebase was not successful, rollback
+  if not is_success then
+    safe_rollback(context)
+  end
+
+  -- Restore original GIT_EDITOR environment variable
+  if old_git_editor ~= "" then
+    vim.fn.setenv("GIT_EDITOR", old_git_editor)
+  else
+    vim.fn.unsetenv("GIT_EDITOR")
+  end
+
+  local final_history_messages = context.history_messages or {}
+
+  -- Ensure final_error is converted to a string
+  local error_message = "Unknown error"
+  if final_error ~= nil then
+    error_message = type(final_error) == "string" and final_error or
+    (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
+  end
+
+  -- Update final state
+  local final_state = is_success and "succeeded" or "failed"
+  if on_state_change then
+    pcall(on_state_change, final_state)
+  end
+
+  -- Create final status message with appropriate state
+  local final_message
+  if final_error then
+    final_message = History.Message:new("assistant",
+      "Rebase Failed: " .. error_message,
+      { just_for_display = true, state = "failed" }
+    )
+  else
+    final_message = History.Message:new("assistant",
+      "Rebase Completed Successfully",
+      { just_for_display = true, state = "succeeded" }
+    )
+  end
+
+  -- Add final message to history messages
+  table.insert(final_history_messages, final_message)
+
+  -- If on_messages_add is provided, use it to add history messages
+  if on_messages_add then
+    -- Use pcall to handle potential errors
+    pcall(function()
+      on_messages_add(final_history_messages)
+    end)
+  end
+
+  -- Call the original on_complete with the results
+  pcall(function()
+    context.main_complete_callback(is_success, final_error and error_message or nil)
+  end)
+end
+
+---@brief Attempt to resolve conflicts during rebase
+---@param context IntelligentRebaseContext The rebase context
+---@param opts table Options for the resolution
+---@param callback fun(success: boolean, error: string|nil): nil Callback to be called when resolution completes
+local function attempt_resolution(context, opts, callback)
+  -- Use resolve_conflicts with a callback
+  resolve_conflicts(context, opts, function(resolution_success, resolution_err)
+    if resolution_success then
+      -- If resolution was successful, continue the rebase process
+      continue_rebase_process(context, opts)
+    else
+      -- Check if we've reached max attempts
+      if context.current_attempt >= context.max_attempts then
+        -- Report completion with failure
+        context.finalize_rebase(false, resolution_err or "Failed to resolve conflicts")
+      else
+        -- Try again with the next attempt
+        -- resolve_conflicts will increment the attempt counter
+        attempt_resolution(context, opts, callback)
+      end
+    end
+  end)
+end
+
+---@brief Continue the rebase process after resolving conflicts
+---@param context IntelligentRebaseContext The rebase context
+---@param opts table Options for the rebase process
+local function continue_rebase_process(context, opts)
+  -- Attempt to continue the rebase
+  local continue_result = vim.fn.system("git rebase --continue 2>&1")
+
+  -- Detect conflicts in the current rebase state
+  local has_conflicts, conflict_err = detect_conflicts(context)
+
+  -- Handle unexpected errors during conflict detection
+  if conflict_err then
+    context.finalize_rebase(false, conflict_err)
+    return
+  end
+
+  -- If no conflicts, rebase is successful
+  if not has_conflicts then
+    context.finalize_rebase(true, nil)
+    return
+  end
+
+  -- Reset attempt counter for this set of conflicts
+  context.current_attempt = 0
+
+  -- Start the resolution process
+  attempt_resolution(context, opts)
 end
 
 ---@type AvanteLLMToolFunc<{ source_branch: string, target_branch: string, max_attempts?: integer }>
@@ -989,130 +1135,27 @@ function M.func(input, opts)
   local old_git_editor = vim.fn.getenv("GIT_EDITOR")
   vim.fn.setenv("GIT_EDITOR", ":")
 
-  -- Define a function to handle final cleanup and completion
-  local function finalize_rebase(success, error)
-    -- Only execute if we haven't already completed
-    if context.has_completed then return end
-
-    -- Mark as completed to prevent further calls
-    context.has_completed = true
-
-    -- Set the final results
-    is_success = success
-    final_error = error
-    resolution_logs = context.resolution_logs
-
-    -- If rebase was not successful, rollback
-    if not is_success then
-      safe_rollback(context)
-    end
-
-    -- Restore original GIT_EDITOR environment variable
-    if old_git_editor ~= "" then
-      vim.fn.setenv("GIT_EDITOR", old_git_editor)
-    else
-      vim.fn.unsetenv("GIT_EDITOR")
-    end
-
-    local final_history_messages = context.history_messages or {}
-
-    -- Ensure final_error is converted to a string
-    local error_message = "Unknown error"
-    if final_error ~= nil then
-      error_message = type(final_error) == "string" and final_error or
-      (type(final_error) == "table" and vim.inspect(final_error) or tostring(final_error))
-    end
-
-    -- Update final state
-    local final_state = is_success and "succeeded" or "failed"
-    if on_state_change then
-      pcall(on_state_change, final_state)
-    end
-
-    -- Create final status message with appropriate state
-    local final_message
-    if final_error then
-      final_message = History.Message:new("assistant",
-        "Rebase Failed: " .. error_message,
-        { just_for_display = true, state = "failed" }
-      )
-    else
-      final_message = History.Message:new("assistant",
-        "Rebase Completed Successfully",
-        { just_for_display = true, state = "succeeded" }
-      )
-    end
-
-    -- Add final message to history messages
-    table.insert(final_history_messages, final_message)
-
-    -- If on_messages_add is provided, use it to add history messages
-    if on_messages_add then
-      -- Use pcall to handle potential errors
-      pcall(function()
-        on_messages_add(final_history_messages)
-      end)
-    end
-
-    -- Call the original on_complete with the results
-    pcall(function()
-      context.main_complete_callback(is_success, final_error and error_message or nil)
-    end)
+  -- Use the module-level finalize_rebase function
+  local function local_finalize_rebase(success, error)
+    finalize_rebase(
+      context,
+      success,
+      error,
+      old_git_editor,
+      is_success,
+      final_error,
+      resolution_logs,
+      on_state_change,
+      on_messages_add
+    )
   end
 
   -- Store the finalize function in the context
   context.finalize_rebase = finalize_rebase
 
-  -- Define a function to handle the rebase process
-  local function continue_rebase_process()
-    -- Attempt to continue the rebase
-    local continue_result = vim.fn.system("git rebase --continue 2>&1")
-
-    -- Detect conflicts in the current rebase state
-    local has_conflicts, conflict_err = detect_conflicts(context)
-
-    -- Handle unexpected errors during conflict detection
-    if conflict_err then
-      context.finalize_rebase(false, conflict_err)
-      return
-    end
-
-    -- If no conflicts, rebase is successful
-    if not has_conflicts then
-      context.finalize_rebase(true, nil)
-      return
-    end
-
-    -- Reset attempt counter for this set of conflicts
-    context.current_attempt = 0
-
-    -- Define a recursive function to handle resolution attempts
-    local function attempt_resolution()
-      -- Use resolve_conflicts with a callback
-      resolve_conflicts(context, opts, function(resolution_success, resolution_err)
-        if resolution_success then
-          -- If resolution was successful, continue the rebase process
-          continue_rebase_process()
-        else
-          -- Check if we've reached max attempts
-          if context.current_attempt >= context.max_attempts then
-            -- Report completion with failure
-            context.finalize_rebase(false, resolution_err or "Failed to resolve conflicts")
-          else
-            -- Try again with the next attempt
-            -- resolve_conflicts will increment the attempt counter
-            attempt_resolution()
-          end
-        end
-      end)
-    end
-
-    -- Start the resolution process
-    attempt_resolution()
-  end
-
+  -- Use the module-level continue_rebase_process function
   -- Start the rebase process
-  continue_rebase_process()
+  continue_rebase_process(context, opts)
 
   -- No direct return values - fully asynchronous pattern
   -- All completion handling is done through callbacks
