@@ -221,7 +221,6 @@ local function log_rebase_update(context, update)
     just_for_display = true,
     state = update.stage,
     tool_use_store = {
-      name = "intelligent_rebase",
       stage = update.stage,
       progress = update.progress or 0
     }

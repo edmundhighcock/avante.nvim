@@ -135,7 +135,6 @@ local function log_resolution_update(context, update)
     just_for_display = true,
     state = update.stage,
     tool_use_store = {
-      name = "resolve_git_conflicts",
       stage = update.stage,
       progress = update.progress or 0
     }
