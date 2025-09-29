@@ -40,17 +40,23 @@ Features:
 - Real-time rebase stage updates
 - Detailed conflict detection and resolution logging
 - Granular progress tracking
-- AI-powered contextual conflict resolution
 - Multiple resolution attempts
 - Safety validation
 - Comprehensive logging
 
 Key Capabilities:
-1. Detect merge conflicts during rebase
-2. Analyze code context for intelligent resolution
-3. Apply safe, context-aware conflict resolution strategies
-4. Provide detailed resolution logs with stage updates
-5. Limit maximum resolution attempts to prevent infinite loops
+1. Start or continue a git rebase operation
+2. Detect merge conflicts during rebase
+3. Provide detailed resolution logs with stage updates
+4. Instruct the LLM to call the resolve_git_conflicts tool when conflicts are detected
+5. Continue the rebase process after conflicts are resolved
+
+Workflow:
+1. Call intelligent_rebase with source and target branches to start a rebase
+2. If conflicts are detected, the tool returns with next_action="resolve_conflicts"
+3. Call resolve_git_conflicts with the provided conflict_files
+4. Call intelligent_rebase again with continue=true to continue the rebase
+5. Repeat steps 2-4 until the rebase is complete (next_action="done")
 
 When to Use:
 - Complex rebasing scenarios with multiple conflicts
@@ -102,7 +108,7 @@ M.param = {
 M.returns = {
   {
     name = "success",
-    description = "Whether the rebase was successful",
+    description = "Whether the rebase was successful or needs further action",
     type = "boolean",
   },
   {
@@ -114,6 +120,18 @@ M.returns = {
     name = "error",
     description = "Error message if the rebase failed",
     type = "string",
+    optional = true,
+  },
+  {
+    name = "next_action",
+    description = "Instructions for the next action the LLM should take (e.g., 'resolve_conflicts', 'continue_rebase', 'done')",
+    type = "string",
+    optional = true,
+  },
+  {
+    name = "conflict_files",
+    description = "List of files with conflicts that need resolution",
+    type = "table",
     optional = true,
   },
 }
@@ -429,30 +447,65 @@ end
 ---@brief Continue the rebase process after resolving conflicts
 ---@param context IntelligentRebaseContext The rebase context
 ---@param opts table Options for the rebase process
-local function continue_rebase_process(context, opts)
+---@param on_complete function Callback function for completion
+local function continue_rebase_process(context, opts, on_complete)
   -- Attempt to continue the rebase
   local continue_result = vim.fn.system("git rebase --continue 2>&1")
+
+  -- Check if the rebase is already in progress
+  local rebase_in_progress = vim.fn.system("git rev-parse --git-path rebase-merge 2>/dev/null || git rev-parse --git-path rebase-apply 2>/dev/null")
+  local is_rebasing = vim.v.shell_error == 0 and rebase_in_progress ~= ""
+
+  -- If not rebasing anymore, check if it completed successfully
+  if not is_rebasing then
+    log_rebase_update(context, {
+      stage = "completed",
+      details = "Rebase completed successfully",
+      progress = 100
+    })
+
+    return on_complete(true, nil, "done", nil)
+  end
 
   -- Detect conflicts in the current rebase state
   local has_conflicts, conflict_err = detect_conflicts(context)
 
   -- Handle unexpected errors during conflict detection
   if conflict_err then
-    context.finalize_rebase(false, conflict_err)
-    return
+    log_rebase_update(context, {
+      stage = "error",
+      details = "Error during rebase: " .. conflict_err,
+      progress = 100,
+      errors = { conflict_err }
+    })
+
+    return on_complete(false, conflict_err, nil, nil)
   end
 
   -- If no conflicts, rebase is successful
   if not has_conflicts then
-    context.finalize_rebase(true, nil)
-    return
+    log_rebase_update(context, {
+      stage = "completed",
+      details = "Rebase completed successfully",
+      progress = 100
+    })
+
+    return on_complete(true, nil, "done", nil)
   end
 
   -- Reset attempt counter for this set of conflicts
   context.current_attempt = 0
 
-  -- Start the resolution process
-  attempt_resolution(context, opts)
+  -- Log that conflicts were detected
+  log_rebase_update(context, {
+    stage = "conflicts_detected",
+    details = "Conflicts detected during rebase. LLM should call resolve_git_conflicts tool.",
+    progress = 50,
+    files = context.conflict_files
+  })
+
+  -- Return with instructions to call resolve_git_conflicts
+  return on_complete(false, nil, "resolve_conflicts", context.conflict_files)
 end
 
 -- Function removed - now handled by resolve_git_conflicts tool
@@ -602,106 +655,17 @@ local function finalize_rebase(context, success, error, old_git_editor, is_succe
   end)
 end
 
----@brief Attempt to resolve conflicts during rebase using the resolve_git_conflicts tool
----@param context IntelligentRebaseContext The rebase context
----@param opts table Options for the resolution
-local function attempt_resolution(context, opts)
-  -- Track this operation as a pending asynchronous operation
-  track_operation(context)
+-- Function removed - now handled by LLM calling resolve_git_conflicts directly
 
-  -- Update current attempt counter for tracking
-  context.current_attempt = context.current_attempt + 1
-
-  -- Log that we're starting a resolution attempt
-  log_rebase_update(context, {
-    stage = "resolving_conflicts",
-    details = string.format("Starting conflict resolution attempt %d/%d using AI",
-                          context.current_attempt,
-                          context.max_attempts),
-    progress = 20,
-    files = context.conflict_files
-  })
-
-  -- Check if we've exceeded the global maximum attempts
-  if context.current_attempt > context.max_attempts then
-    log_rebase_update(context, {
-      stage = "resolving_conflicts",
-      details = "Maximum global resolution attempts exceeded",
-      progress = 100,
-      errors = { "Could not resolve conflicts after maximum attempts" }
-    })
-
-    complete_operation(context, nil, false, "Maximum global resolution attempts exceeded")
-    context.finalize_rebase(false, "Maximum global resolution attempts exceeded")
-    return
-  end
-
-  -- Use the resolve_git_conflicts tool to resolve conflicts
-  require("avante.llm_tools.resolve_git_conflicts").func({
-    conflict_files = context.conflict_files,
-    max_attempts = context.max_attempts,
-    current_attempt = context.current_attempt - 1  -- Pass the attempt before increment
-  }, {
-    on_log = opts.on_log,
-    on_messages_add = function(messages)
-      -- Pass messages to the parent context
-      if context.on_messages_add then
-        context.on_messages_add(messages)
-      end
-    end,
-    set_store = opts.set_store,
-    session_ctx = opts.session_ctx,
-    on_complete = function(result, err)
-      -- Complete the operation
-      complete_operation(context, nil, result ~= false, err)
-
-      if result and result.success then
-        -- If resolution was successful, update logs and continue the rebase process
-        if result.resolution_logs then
-          -- Copy resolution logs to the rebase context
-          for _, log in ipairs(result.resolution_logs) do
-            table.insert(context.resolution_logs, log)
-          end
-        end
-
-        -- Continue the rebase process
-        continue_rebase_process(context, opts)
-      else
-        -- Resolution failed, check if we've reached max attempts
-        if context.current_attempt >= context.max_attempts then
-          -- Create a detailed error message
-          local error_msg = err or "Failed to resolve conflicts after maximum attempts"
-
-          -- Log the failure
-          log_rebase_update(context, {
-            stage = "resolving_conflicts",
-            details = "Maximum resolution attempts reached",
-            progress = 100,
-            errors = { error_msg }
-          })
-
-          -- Report completion with failure
-          context.finalize_rebase(false, error_msg)
-        else
-          -- Try again with the next attempt
-          log_rebase_update(context, {
-            stage = "resolving_conflicts",
-            details = string.format("Resolution failed, starting attempt %d/%d",
-                                  context.current_attempt + 1,
-                                  context.max_attempts),
-            progress = 20
-          })
-
-          -- Try again with the next attempt
-          attempt_resolution(context, opts)
-        end
-      end
-    end
-  })
-end
-
----@type AvanteLLMToolFunc<{ source_branch: string, target_branch: string, max_attempts?: integer }>
----@note This function is fully asynchronous and requires on_complete callback for results
+---@type AvanteLLMToolFunc<{ source_branch: string, target_branch: string, max_attempts?: integer, continue?: boolean }>
+---@brief Intelligent git rebase tool that instructs the LLM to handle conflicts
+---@param input { source_branch: string, target_branch: string, max_attempts?: integer, continue?: boolean } Input parameters
+---@param opts table Options for the tool
+---@return { success: boolean, error?: string, resolution_logs: table, next_action?: string, conflict_files?: table } Tool results
+--- The next_action field will be one of:
+--- - "resolve_conflicts": LLM should call resolve_git_conflicts with the provided conflict_files
+--- - "done": Rebase completed successfully
+--- - "processing": Tool is still running and will return final result through callback
 function M.func(input, opts)
   opts = opts or {}
   local on_log = opts.on_log
@@ -715,6 +679,8 @@ function M.func(input, opts)
   local is_success = false
   local resolution_logs = {}
   local final_error = nil
+  local next_action = nil
+  local conflict_files = {}
 
   -- If continue is true, skip initialization
   local context
@@ -776,15 +742,12 @@ function M.func(input, opts)
         end)
       end
 
-        -- Mark as completed to prevent further operations
-        context.has_completed = true
-
-      -- Complete with error
-      pcall(function()
-        on_complete(is_success, error_str)
-      end)
-
-      return -- Exit early but don't return values
+      -- Return synchronously with error information
+      return {
+        success = false,
+        error = error_str,
+        resolution_logs = {}
+      }
     end
   end
 
@@ -794,37 +757,56 @@ function M.func(input, opts)
   context.on_state_change = on_state_change
   context.history_messages = {}
 
-  -- Store the main completion callback in the context
-  context.main_complete_callback = on_complete
-
   -- Set GIT_EDITOR to prevent interactive editor sessions for all Git commands
   local old_git_editor = vim.fn.getenv("GIT_EDITOR")
   vim.fn.setenv("GIT_EDITOR", ":")
 
-  -- Use the module-level finalize_rebase function
-  local function local_finalize_rebase(success, error)
-    finalize_rebase(
-      context,
-      success,
-      error,
-      old_git_editor,
-      is_success,
-      final_error,
-      resolution_logs,
-      on_state_change,
-      on_messages_add
-    )
+  -- Callback to handle completion
+  local function handle_completion(success, error, action, files)
+    -- Restore original GIT_EDITOR environment variable
+    if old_git_editor ~= "" then
+      vim.fn.setenv("GIT_EDITOR", old_git_editor)
+    else
+      vim.fn.unsetenv("GIT_EDITOR")
+    end
+
+    -- Set return values
+    is_success = success
+    final_error = error
+    next_action = action
+    conflict_files = files or {}
+    resolution_logs = context.resolution_logs or {}
+
+    -- Return synchronously with the appropriate information
+    if on_complete then
+      on_complete({
+        success = is_success,
+        error = final_error,
+        resolution_logs = resolution_logs,
+        next_action = next_action,
+        conflict_files = conflict_files
+      })
+    end
+
+    return {
+      success = is_success,
+      error = final_error,
+      resolution_logs = resolution_logs,
+      next_action = next_action,
+      conflict_files = conflict_files
+    }
   end
 
-  -- Store the finalize function in the context
-  context.finalize_rebase = finalize_rebase
+  -- Start or continue the rebase process
+  continue_rebase_process(context, opts, handle_completion)
 
-  -- Use the module-level continue_rebase_process function
-  -- Start the rebase process
-  continue_rebase_process(context, opts)
-
-  -- No direct return values - fully asynchronous pattern
-  -- All completion handling is done through callbacks
+  -- This function now returns synchronously
+  return {
+    success = false,
+    next_action = "processing",
+    resolution_logs = {},
+    error = "The rebase operation is still processing. The tool will return the final result through the on_complete callback."
+  }
 end
 
 return M
