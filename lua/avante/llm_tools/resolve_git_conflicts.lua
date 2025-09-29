@@ -133,7 +133,12 @@ local function log_resolution_update(context, update)
   -- Always create a history message to ensure sidebar updates
   local history_message = History.Message:new("assistant", message_content, {
     just_for_display = true,
-    state = update.stage
+    state = update.stage,
+    llm_tool = {
+      name = "resolve_git_conflicts",
+      stage = update.stage,
+      progress = update.progress or 0
+    }
   })
 
   -- Store the current state in the context
