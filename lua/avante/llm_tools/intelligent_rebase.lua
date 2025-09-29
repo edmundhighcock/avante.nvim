@@ -602,35 +602,6 @@ local function finalize_rebase(context, success, error, old_git_editor, is_succe
   end)
 end
 
----@brief Continue the rebase process after resolving conflicts
----@param context IntelligentRebaseContext The rebase context
----@param opts table Options for the rebase process
-local function continue_rebase_process(context, opts)
-  -- Attempt to continue the rebase
-  local continue_result = vim.fn.system("git rebase --continue 2>&1")
-
-  -- Detect conflicts in the current rebase state
-  local has_conflicts, conflict_err = detect_conflicts(context)
-
-  -- Handle unexpected errors during conflict detection
-  if conflict_err then
-    context.finalize_rebase(false, conflict_err)
-    return
-  end
-
-  -- If no conflicts, rebase is successful
-  if not has_conflicts then
-    context.finalize_rebase(true, nil)
-    return
-  end
-
-  -- Reset attempt counter for this set of conflicts
-  context.current_attempt = 0
-
-  -- Start the resolution process
-  attempt_resolution(context, opts)
-end
-
 ---@brief Attempt to resolve conflicts during rebase using the resolve_git_conflicts tool
 ---@param context IntelligentRebaseContext The rebase context
 ---@param opts table Options for the resolution
