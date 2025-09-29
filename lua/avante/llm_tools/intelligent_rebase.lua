@@ -220,7 +220,7 @@ local function log_rebase_update(context, update)
   local history_message = History.Message:new("assistant", message_content, {
     just_for_display = true,
     state = update.stage,
-    llm_tool = {
+    tool_use_store = {
       name = "intelligent_rebase",
       stage = update.stage,
       progress = update.progress or 0
@@ -812,6 +812,62 @@ function M.func(input, opts)
     resolution_logs = {},
     error = "The rebase operation is still processing. The tool will return the final result through the on_complete callback."
   }
+end
+
+---@class RebaseInput
+---@field source_branch string
+---@field target_branch string
+---@field max_attempts? integer
+---@field continue? boolean
+
+---@type avante.LLMToolOnRender<RebaseInput>
+function M.on_render(input, opts)
+  local Line = require("avante.ui.line")
+  local Highlights = require("avante.highlights")
+  local Utils = require("avante.utils")
+
+  local store = opts.store or {}
+  local state = opts.state or "initializing"
+  local lines = {}
+
+  local icon = "🔄"
+  local highlight = Highlights.AVANTE_TASK_RUNNING
+
+  if state == "completed" or state == "succeeded" then
+    icon = "✅"
+    highlight = Highlights.AVANTE_TASK_COMPLETED
+  elseif state == "failed" or state == "error" then
+    icon = "❌"
+    highlight = Highlights.AVANTE_TASK_FAILED
+  elseif state == "conflicts_detected" then
+    icon = "⚠️"
+    highlight = Highlights.AVANTE_WARNING
+  end
+
+  -- Add header
+  local header = string.format("%s Intelligent Rebase: %s", Utils.icon(icon .. " "), state)
+  table.insert(lines, Line:new({ { header, highlight } }))
+  table.insert(lines, Line:new({ { "" } }))
+
+  -- Add branch information
+  local branch_info = string.format("  Rebasing %s onto %s",
+    input.source_branch or store.source_branch or "source",
+    input.target_branch or store.target_branch or "target")
+  table.insert(lines, Line:new({ { branch_info } }))
+
+  -- Add progress if available
+  if store.progress and type(store.progress) == "number" then
+    local progress_text = string.format("  Progress: %d%%", store.progress)
+    table.insert(lines, Line:new({ { progress_text } }))
+  end
+
+  -- Add current stage if available
+  if store.stage and type(store.stage) == "string" and store.stage ~= state then
+    local stage_text = string.format("  Current stage: %s", store.stage)
+    table.insert(lines, Line:new({ { stage_text } }))
+  end
+
+  return lines
 end
 
 return M

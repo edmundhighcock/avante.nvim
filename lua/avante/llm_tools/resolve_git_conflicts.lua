@@ -134,7 +134,7 @@ local function log_resolution_update(context, update)
   local history_message = History.Message:new("assistant", message_content, {
     just_for_display = true,
     state = update.stage,
-    llm_tool = {
+    tool_use_store = {
       name = "resolve_git_conflicts",
       stage = update.stage,
       progress = update.progress or 0
@@ -601,7 +601,61 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   })
 end
 
----@type AvanteLLMToolFunc<{ conflict_files: string[], max_attempts?: number, current_attempt?: number }>
+---@class ConflictResolutionInput
+---@field conflict_files string[]
+---@field max_attempts? number
+---@field current_attempt? number
+
+---@type avante.LLMToolOnRender<ConflictResolutionInput>
+function M.on_render(input, opts)
+  local Line = require("avante.ui.line")
+  local Highlights = require("avante.highlights")
+  local Utils = require("avante.utils")
+
+  local store = opts.store or {}
+  local state = opts.state or "initializing"
+  local lines = {}
+
+  local icon = "🔄"
+  local highlight = Highlights.AVANTE_TASK_RUNNING
+
+  if state == "completed" then
+    icon = "✅"
+    highlight = Highlights.AVANTE_TASK_COMPLETED
+  elseif state == "failed" or state == "error" then
+    icon = "❌"
+    highlight = Highlights.AVANTE_TASK_FAILED
+  elseif state == "conflicts_detected" then
+    icon = "⚠️"
+    highlight = Highlights.AVANTE_WARNING
+  end
+
+  -- Add header
+  local header = string.format("%s Git Conflict Resolution: %s", Utils.icon(icon .. " "), state)
+  table.insert(lines, Line:new({ { header, highlight } }))
+  table.insert(lines, Line:new({ { "" } }))
+
+  -- Add file information
+  local num_files = input.conflict_files and #input.conflict_files or 0
+  local file_info = string.format("  Resolving %d conflict file(s)", num_files)
+  table.insert(lines, Line:new({ { file_info } }))
+
+  -- Add progress if available
+  if store.progress and type(store.progress) == "number" then
+    local progress_text = string.format("  Progress: %d%%", store.progress)
+    table.insert(lines, Line:new({ { progress_text } }))
+  end
+
+  -- Add current stage if available
+  if store.stage and type(store.stage) == "string" and store.stage ~= state then
+    local stage_text = string.format("  Current stage: %s", store.stage)
+    table.insert(lines, Line:new({ { stage_text } }))
+  end
+
+  return lines
+end
+
+---@type AvanteLLMToolFunc<ConflictResolutionInput>
 function M.func(input, opts)
   local on_log = opts.on_log
   local on_complete = opts.on_complete
