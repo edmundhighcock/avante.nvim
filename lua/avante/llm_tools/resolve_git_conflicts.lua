@@ -100,6 +100,10 @@ M.returns = {
   },
 }
 
+-- Forward declarations for functions referenced before their definitions
+local verify_conflict_resolution
+local handle_verification_result
+
 -- Helper functions for conflict resolution
 
 ---@brief Log resolution update with stage, details, and progress
@@ -136,8 +140,8 @@ local function log_resolution_update(context, update)
     state = update.stage,
     tool_use_store = {
       stage = update.stage,
-      progress = update.progress or 0
-    }
+      progress = update.progress or 0,
+    },
   })
 
   -- Store the current state in the context
@@ -630,7 +634,7 @@ end
 ---@param context ConflictResolutionContext
 ---@param opts table Optional configuration options
 ---@param verification_callback fun(is_valid: boolean, issues: table|nil): nil Callback to be called when verification is complete
-local function verify_conflict_resolution(conflict_file, context, opts, verification_callback)
+verify_conflict_resolution = function(conflict_file, context, opts, verification_callback)
   if not vim.fn.filereadable(conflict_file) then
     return verification_callback(false, {"File is not readable"})
   end
@@ -779,7 +783,7 @@ function M.func(input, opts)
     on_messages_add = opts.on_messages_add,
     on_state_change = function(state)
       if opts.set_store then opts.set_store("state", state) end
-    end
+    end,
   }
 
   -- Log initial state
@@ -825,7 +829,7 @@ end
 ---@param opts table Optional configuration options
 ---@param resolution_errors table Table to collect resolution errors
 ---@param callback fun(success: boolean, error: string | nil): nil Final callback
-local function handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, callback)
+handle_verification_result = function(is_valid, issues, conflict_file, context, opts, resolution_errors, callback)
   if not is_valid then
     -- Resolution verification failed - create a more detailed error message
     local conflict_markers_found = false
@@ -935,7 +939,7 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
 
       -- Complete this operation - will trigger next file processing in complete_operation
       complete_operation(context, nil, false, error_msg)
-    }
+    end
   else
     -- Verification passed, proceed with staging
     log_resolution_update(context, {
@@ -998,7 +1002,7 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
 
     -- Complete this operation - will trigger next file processing in complete_operation
     complete_operation(context, nil, true, nil)
-  }
+  end
 end
 
 return M
