@@ -578,6 +578,7 @@ local function process_conflict_files(context, opts, resolution_errors, callback
   local Path = require("avante.path")
   require("avante.llm_tools.dispatch_full_agent").func({
     prompt = Path.prompts.render_file("_conflict-resolution.avanterules", {
+      ask = "Resolve git conflicts",
       conflict_file = conflict_file,
       file_content_str = file_content_str:sub(1, 4000), -- Limit size to avoid token issues
     })
@@ -678,6 +679,7 @@ verify_conflict_resolution = function(conflict_file, context, opts, verification
   -- Simplify callback structure by using a direct callback function
   require("avante.llm_tools.dispatch_full_agent").func({
     prompt = Path.prompts.render_file("_conflict-verification.avanterules", {
+      ask = "Verify git conflict resolution",
       conflict_file = conflict_file,
       file_content_str = file_content_str:sub(1, 8000), -- Limit size to avoid token issues
       attempt_number = file_attempt, -- Pass attempt information to the verification agent
