@@ -581,6 +581,7 @@ local function process_conflict_files(context, opts, resolution_errors, callback
       ask = true,
       conflict_file = conflict_file,
       file_content_str = file_content_str:sub(1, 4000), -- Limit size to avoid token issues
+      code_lang = "text" -- Add code_lang parameter to specify language for code blocks
     })
   }, {
     on_log = opts.on_log or function() end,
@@ -683,7 +684,8 @@ verify_conflict_resolution = function(conflict_file, context, opts, verification
       conflict_file = conflict_file,
       file_content_str = file_content_str:sub(1, 8000), -- Limit size to avoid token issues
       attempt_number = file_attempt, -- Pass attempt information to the verification agent
-      max_attempts = context.max_attempts
+      max_attempts = context.max_attempts,
+      code_lang = "text" -- Add code_lang parameter to specify language for code blocks
     })
   }, {
     on_log = opts.on_log or function() end,
