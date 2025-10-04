@@ -675,6 +675,7 @@ M._tools = {
   require("avante.llm_tools.dispatch_agent"),
   require("avante.llm_tools.dispatch_full_agent"),
   require("avante.llm_tools.intelligent_rebase"),
+  require("avante.llm_tools.resolve_git_conflicts"),
   require("avante.llm_tools.glob"),
   require("avante.llm_tools.load_mcp_tool"),
   {
