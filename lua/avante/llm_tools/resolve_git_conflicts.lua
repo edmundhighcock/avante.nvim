@@ -58,7 +58,7 @@ M.param = {
       name = "conflict_files",
       description = "List of files with merge conflicts to resolve",
       type = "array",
-      items = { type = "string" },
+      items = { name = "file", description = "Path to a file with merge conflicts", type = "string" },
     },
     {
       name = "max_attempts",
