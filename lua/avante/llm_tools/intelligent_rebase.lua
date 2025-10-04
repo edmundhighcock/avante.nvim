@@ -453,6 +453,21 @@ end
 ---@param opts table Options for the rebase process
 ---@param on_complete function Callback function for completion
 local function continue_rebase_process(context, opts, on_complete)
+  -- Check if there are still unresolved conflicts
+  local unresolved_conflicts = vim.fn.systemlist("git diff --name-only --diff-filter=U")
+
+  -- If there are still unresolved conflicts, don't continue the rebase
+  if #unresolved_conflicts > 0 then
+    log_rebase_update(context, {
+      stage = "error",
+      details = "Cannot continue rebase: unresolved conflicts still exist",
+      progress = 100,
+      errors = {"Conflict resolution failed or was incomplete", "Please resolve all conflicts before continuing"}
+    })
+
+    return on_complete(false, "Unresolved conflicts still exist. Conflict resolution failed.", nil, unresolved_conflicts)
+  end
+
   -- Attempt to continue the rebase
   local continue_result = vim.fn.system("git rebase --continue 2>&1")
 
@@ -678,6 +693,37 @@ function M.func(input, opts)
   local on_messages_add = opts.on_messages_add
   local on_state_change = opts.on_state_change
   local session_ctx = opts.session_ctx
+
+  -- Check if we're continuing a rebase with the 'continue' flag
+  if input.continue then
+    -- Check for unresolved conflicts before continuing
+    local unresolved_conflicts = vim.fn.systemlist("git diff --name-only --diff-filter=U")
+    if #unresolved_conflicts > 0 then
+      -- If conflicts still exist, the resolve_git_conflicts tool likely failed
+      local error_msg = "Cannot continue rebase: Previous conflict resolution failed or was incomplete"
+
+      -- Create a detailed error log
+      local resolution_logs = {
+        {
+          timestamp = os.time(),
+          stage = "error",
+          details = error_msg,
+          progress = 100,
+          files = unresolved_conflicts,
+          errors = {"Conflict resolution failed", "Please resolve all conflicts before continuing"}
+        }
+      }
+
+      -- Return synchronously with error information
+      return {
+        success = false,
+        error = error_msg,
+        resolution_logs = resolution_logs,
+        next_action = "resolve_conflicts",
+        conflict_files = unresolved_conflicts
+      }
+    end
+  end
 
   -- Track the overall result and error state
   local is_success = false
