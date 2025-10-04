@@ -807,6 +807,12 @@ function M.func(input, opts)
   context.on_state_change = on_state_change
   context.history_messages = {}
 
+  -- Persist branch names for renderer clarity
+  if opts.set_store then
+    pcall(opts.set_store, "source_branch", context.source_branch)
+    pcall(opts.set_store, "target_branch", context.target_branch)
+  end
+
   -- Set GIT_EDITOR to prevent interactive editor sessions for all Git commands
   local old_git_editor = vim.fn.getenv("GIT_EDITOR")
   vim.fn.setenv("GIT_EDITOR", ":")
@@ -847,15 +853,34 @@ function M.func(input, opts)
     }
   end
 
-  -- Start or continue the rebase process
-  continue_rebase_process(context, opts, handle_completion)
+  -- Start or continue the rebase process (synchronous; callback invoked before return)
+  local result_table = nil
+  continue_rebase_process(context, opts, function(cb_result_success, cb_result_error, cb_next_action, cb_conflict_files)
+    result_table = {
+      success = cb_result_success,
+      error = cb_result_error,
+      resolution_logs = context.resolution_logs or {},
+      next_action = cb_next_action,
+      conflict_files = cb_conflict_files or {}
+    }
+    -- Propagate to any on_complete consumer
+    on_complete(result_table)
+  end)
 
-  -- This function now returns synchronously
-  return {
+  -- Persist branch names and current stage (if available) for renderer clarity
+  if opts.set_store then
+    pcall(opts.set_store, "source_branch", context.source_branch)
+    pcall(opts.set_store, "target_branch", context.target_branch)
+    if result_table and result_table.next_action then
+      pcall(opts.set_store, "stage", result_table.next_action)
+    end
+  end
+
+  -- Return the actual synchronous result (no confusing placeholder)
+  return result_table or {
     success = false,
-    next_action = "processing",
+    error = "Rebase process did not produce a result synchronously",
     resolution_logs = {},
-    error = "The rebase operation is still processing. The tool will return the final result through the on_complete callback."
   }
 end
 
