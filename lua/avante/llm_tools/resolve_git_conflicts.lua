@@ -894,3 +894,4 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
   end
 end
 
+return M
