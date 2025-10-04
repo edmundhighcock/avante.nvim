@@ -575,8 +575,9 @@ local function process_conflict_files(context, opts, resolution_errors, callback
   end
 
   -- Use dispatch_full_agent to analyze and resolve conflicts
+  local Path = require("avante.path")
   require("avante.llm_tools.dispatch_full_agent").func({
-    prompt = Utils.read_template("_conflict-resolution.avanterules", {
+    prompt = Path.prompts.render_file("_conflict-resolution.avanterules", {
       conflict_file = conflict_file,
       file_content_str = file_content_str:sub(1, 4000), -- Limit size to avoid token issues
     })
@@ -672,11 +673,11 @@ verify_conflict_resolution = function(conflict_file, context, opts, verification
   local file_content_str = table.concat(file_content, "\n")
 
   -- Use a separate verification agent to verify the resolution
-  local Utils = require("avante.utils")
+  local Path = require("avante.path")
 
   -- Simplify callback structure by using a direct callback function
   require("avante.llm_tools.dispatch_full_agent").func({
-    prompt = Utils.read_template("_conflict-verification.avanterules", {
+    prompt = Path.prompts.render_file("_conflict-verification.avanterules", {
       conflict_file = conflict_file,
       file_content_str = file_content_str:sub(1, 8000), -- Limit size to avoid token issues
       attempt_number = file_attempt, -- Pass attempt information to the verification agent
