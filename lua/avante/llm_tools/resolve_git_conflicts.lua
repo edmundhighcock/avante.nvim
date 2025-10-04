@@ -223,10 +223,45 @@ local function complete_operation(context, on_complete, success, error)
     })
   end
 
-  -- Check if all operations are complete and we haven't already signaled completion
-  if context.pending_operations == 0 and not context.has_completed and on_complete then
-    context.has_completed = true
+  -- First, check if we have a specific on_complete callback
+  if on_complete then
     pcall(on_complete, success, error)
+  end
+
+  -- Then, check if all operations for the current file are complete and we should continue processing
+  if context.pending_operations == 0 and not context.has_completed then
+    -- If we have a main callback and no more files to process, signal completion
+    if context.current_file_index > #context.conflict_files and context.main_callback then
+      context.has_completed = true
+      pcall(context.main_callback, success, error)
+      return
+    end
+
+    -- If we have more files to process and we're not already processing the next file
+    if not context.processing_next_file and context.current_file_index <= #context.conflict_files then
+      context.processing_next_file = true
+
+      -- Schedule the next file processing to avoid stack overflow and ensure clean async boundaries
+      vim.schedule(function()
+        -- If retry_current_file is set, don't increment the file index
+        if not context.retry_current_file then
+          context.current_file_index = context.current_file_index + 1
+        end
+
+        -- Clear the retry flag
+        context.retry_current_file = nil
+
+        -- Process the next file if we haven't completed yet
+        if not context.has_completed then
+          process_conflict_files(
+            context,
+            context.process_opts,
+            context.process_resolution_errors,
+            context.main_callback
+          )
+        end
+      end)
+    end
   end
 end
 
@@ -857,7 +892,7 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
       errors = issues or {"Unknown verification issues"}
     })
 
-    -- If we still have attempts left for this file, try again with the same file
+    -- If we still have attempts left for this file, set retry flag to true
     if file_attempt < context.max_attempts then
       log_resolution_update(context, {
         stage = "resolving_conflicts",
@@ -869,15 +904,16 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
         errors = issues or {"Unknown verification issues"}
       })
 
-      -- Complete this operation
-      complete_operation(context, nil, false, error_msg)
+      -- Store necessary context for file processing
+      context.process_opts = opts
+      context.process_resolution_errors = resolution_errors
+      context.main_callback = callback
 
-      -- Don't increment the file index, retry the same file
-      if not context.processing_next_file then
-        context.processing_next_file = true
-        process_conflict_files(context, opts, resolution_errors, callback)
-      end
-      return
+      -- Set retry flag to true - don't increment file index
+      context.retry_current_file = true
+
+      -- Complete this operation - will trigger next file processing in complete_operation
+      complete_operation(context, nil, false, error_msg)
     else
       -- Max attempts reached for this file, log and move on
       log_resolution_update(context, {
@@ -889,16 +925,17 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
         errors = {"Failed to resolve after maximum attempts"}
       })
 
-      -- Complete this operation
-      complete_operation(context, nil, false, error_msg)
+      -- Store necessary context for file processing
+      context.process_opts = opts
+      context.process_resolution_errors = resolution_errors
+      context.main_callback = callback
 
-      -- Move to the next file
-      if not context.processing_next_file then
-        context.processing_next_file = true
-        context.current_file_index = context.current_file_index + 1
-        process_conflict_files(context, opts, resolution_errors, callback)
-      end
-    end
+      -- Set retry flag to false - increment file index
+      context.retry_current_file = false
+
+      -- Complete this operation - will trigger next file processing in complete_operation
+      complete_operation(context, nil, false, error_msg)
+    }
   else
     -- Verification passed, proceed with staging
     log_resolution_update(context, {
@@ -951,16 +988,17 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
       end
     end
 
-    -- Complete this operation
-    complete_operation(context, nil, true, nil)
+    -- Store necessary context for file processing
+    context.process_opts = opts
+    context.process_resolution_errors = resolution_errors
+    context.main_callback = callback
 
-    -- Move to the next file
-    if not context.processing_next_file then
-      context.processing_next_file = true
-      context.current_file_index = context.current_file_index + 1
-      process_conflict_files(context, opts, resolution_errors, callback)
-    end
-  end
+    -- Set retry flag to false - increment file index
+    context.retry_current_file = false
+
+    -- Complete this operation - will trigger next file processing in complete_operation
+    complete_operation(context, nil, true, nil)
+  }
 end
 
 return M
