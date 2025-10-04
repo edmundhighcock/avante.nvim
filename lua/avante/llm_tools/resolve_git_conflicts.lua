@@ -191,13 +191,35 @@ end
 local function complete_operation(context, on_complete, success, error)
   if not context then return end
 
-  -- Decrement the pending operations counter
-  context.pending_operations = math.max(0, (context.pending_operations or 0) - 1)
+  -- Ensure we have a valid operation count before decrementing
+  if not context.pending_operations or context.pending_operations <= 0 then
+    -- Log warning about operation tracking mismatch
+    if context.on_log then
+      pcall(context.on_log, {
+        type = "operation_tracking",
+        data = {
+          action = "warning",
+          message = "Attempted to complete operation when no operations were pending",
+          count = 0
+        }
+      })
+    end
+    context.pending_operations = 0
+  else
+    -- Decrement the pending operations counter
+    context.pending_operations = context.pending_operations - 1
+  end
 
+  -- Log the operation completion for debugging
   if context.on_log then
     pcall(context.on_log, {
       type = "operation_tracking",
-      data = { action = "complete", count = context.pending_operations }
+      data = {
+        action = "complete",
+        count = context.pending_operations,
+        success = success,
+        error = error or "none"
+      }
     })
   end
 
@@ -216,8 +238,20 @@ end
 local function check_completion(context, on_complete, success, error)
   if not context then return end
 
+  -- Log the check operation for debugging
+  if context.on_log then
+    pcall(context.on_log, {
+      type = "operation_tracking",
+      data = {
+        action = "check_completion",
+        count = context.pending_operations or 0,
+        has_completed = context.has_completed or false
+      }
+    })
+  end
+
   -- If there are no pending operations and we haven't already signaled completion
-  if context.pending_operations == 0 and not context.has_completed and on_complete then
+  if (context.pending_operations or 0) == 0 and not context.has_completed and on_complete then
     context.has_completed = true
     pcall(on_complete, success, error)
   end
@@ -305,15 +339,17 @@ local function handle_verification_complete(result, err, context, conflict_file,
   return verification_callback(verification_result.passed, verification_result.issues)
 end
 
----@brief Process a single conflict file
----@param index integer Index of the conflict file to process
+---@brief Process conflict files using a queue-based approach
 ---@param context ConflictResolutionContext
 ---@param opts table Optional configuration options
 ---@param resolution_errors table Table to collect resolution errors
 ---@param callback fun(success: boolean, error: string | nil): nil Final callback
-local function process_next_conflict(index, context, opts, resolution_errors, callback)
+local function process_conflict_files(context, opts, resolution_errors, callback)
+  -- Initialize file index if not already set
+  context.current_file_index = context.current_file_index or 1
+
   -- Check if we've processed all conflicts
-  if index > #context.conflict_files then
+  if context.current_file_index > #context.conflict_files then
     -- All conflicts processed, check for errors
     if #resolution_errors > 0 then
       -- Count how many files had errors
@@ -363,11 +399,14 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
   end
 
   -- Get the current conflict file to process
-  local conflict_file = context.conflict_files[index]
+  local conflict_file = context.conflict_files[context.current_file_index]
 
   -- Get current attempt for this file
   local file_attempt = (context.file_attempt_counters or {})[conflict_file] or 0
   local is_retry = file_attempt > 0
+
+  -- Flag to ensure we only process the next file once
+  context.processing_next_file = false
 
   -- Log with retry information if applicable
   if is_retry then
@@ -395,8 +434,9 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
       file = conflict_file,
       error = "File is not readable"
     })
-    -- Process the next conflict file
-    return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+    -- Move to the next file
+    context.current_file_index = context.current_file_index + 1
+    return process_conflict_files(context, opts, resolution_errors, callback)
   end
 
   -- Read the conflict file content
@@ -413,14 +453,86 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
         error = "Failed to stage file without conflict markers: " .. stage_result
       })
     end
-    -- Process the next conflict file
-    return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+    -- Move to the next file
+    context.current_file_index = context.current_file_index + 1
+    return process_conflict_files(context, opts, resolution_errors, callback)
   end
 
   -- Track this operation as a pending asynchronous operation
   track_operation(context)
 
   local Utils = require("avante.utils")
+
+  -- Define a callback function for handling resolution completion
+  local function on_resolution_complete(result, err)
+    if err then
+      log_resolution_update(context, {
+        stage = "resolving_conflicts",
+        details = string.format("Agent resolution failed for file: %s", conflict_file),
+        progress = 75,
+        errors = { err }
+      })
+
+      table.insert(resolution_errors, {
+        file = conflict_file,
+        error = err
+      })
+
+      -- Complete this operation
+      complete_operation(context, nil, false, err)
+
+      -- Only move to the next file if we haven't already started processing it
+      if not context.processing_next_file then
+        context.processing_next_file = true
+        context.current_file_index = context.current_file_index + 1
+        process_conflict_files(context, opts, resolution_errors, callback)
+      end
+    else
+      -- Log resolution completion
+      log_resolution_update(context, {
+        stage = "resolving_conflicts",
+        details = string.format("Resolution completed for file: %s, verifying quality", conflict_file),
+        progress = 75,
+        files = { conflict_file }
+      })
+
+      -- Verify file exists before verification
+      if vim.fn.filereadable(conflict_file) ~= 1 then
+        local error_msg = string.format("Cannot verify file: %s does not exist or is not readable", conflict_file)
+        table.insert(resolution_errors, {
+          file = conflict_file,
+          error = error_msg
+        })
+
+        log_resolution_update(context, {
+          stage = "resolving_conflicts",
+          details = "Verification failed - file not readable",
+          progress = 80,
+          errors = { error_msg }
+        })
+
+        -- Complete this operation
+        complete_operation(context, nil, false, error_msg)
+
+        -- Only move to the next file if we haven't already started processing it
+        if not context.processing_next_file then
+          context.processing_next_file = true
+          context.current_file_index = context.current_file_index + 1
+          process_conflict_files(context, opts, resolution_errors, callback)
+        end
+        return
+      end
+
+      -- Define a dedicated verification callback
+      local function verification_handler(is_valid, issues)
+        -- Handle verification result will be called from the verification callback
+        handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, callback)
+      end
+
+      -- Use the verification agent to verify the resolution quality
+      verify_conflict_resolution(conflict_file, context, opts, verification_handler)
+    end
+  end
 
   -- Use dispatch_full_agent to analyze and resolve conflicts
   require("avante.llm_tools.dispatch_full_agent").func({
@@ -430,63 +542,7 @@ local function process_next_conflict(index, context, opts, resolution_errors, ca
     })
   }, {
     on_log = opts.on_log or function() end,
-    on_complete = function(result, err)
-      if err then
-        log_resolution_update(context, {
-          stage = "resolving_conflicts",
-          details = string.format("Agent resolution failed for file: %s", conflict_file),
-          progress = 75,
-          errors = { err }
-        })
-
-        table.insert(resolution_errors, {
-          file = conflict_file,
-          error = err
-        })
-      else
-        -- Log resolution completion
-        log_resolution_update(context, {
-          stage = "resolving_conflicts",
-          details = string.format("Resolution completed for file: %s, verifying quality", conflict_file),
-          progress = 75,
-          files = { conflict_file }
-        })
-
-        -- Verify file exists before verification
-        if vim.fn.filereadable(conflict_file) ~= 1 then
-          local error_msg = string.format("Cannot verify file: %s does not exist or is not readable", conflict_file)
-          table.insert(resolution_errors, {
-            file = conflict_file,
-            error = error_msg
-          })
-
-          log_resolution_update(context, {
-            stage = "resolving_conflicts",
-            details = "Verification failed - file not readable",
-            progress = 80,
-            errors = { error_msg }
-          })
-
-          -- Complete this operation and move to next file
-          complete_operation(context, nil, false, error_msg)
-          return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
-        end
-
-        -- Use the verification agent to verify the resolution quality with our new extracted function
-        verify_conflict_resolution(conflict_file, context, opts, function(is_valid, issues)
-          handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, index, callback)
-        end)
-
-        -- Don't proceed to the next file yet - the verification callback will handle that
-        return
-      end
-
-      -- Complete this operation and decrement the pending operations counter
-      complete_operation(context, nil, err == nil, err)
-
-      -- Process the next conflict file
-      process_next_conflict(index + 1, context, opts, resolution_errors, callback)
-    end,
+    on_complete = on_resolution_complete,
     session_ctx = opts.session_ctx or {},
     store = {
       messages = {}
@@ -528,7 +584,7 @@ local function resolve_conflicts(context, opts, callback)
   local resolution_errors = {}
 
   -- Start processing the first conflict file
-  process_next_conflict(1, context, opts, resolution_errors, callback)
+  process_conflict_files(context, opts, resolution_errors, callback)
 
   -- The function now uses callbacks, so we don't need this synchronous return.
   -- All completion logic is handled in the process_next_conflict function.
@@ -578,11 +634,7 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
   -- Use a separate verification agent to verify the resolution
   local Utils = require("avante.utils")
 
-  -- Create a dedicated function for verification completion
-  local function on_verification_complete(result, err)
-    handle_verification_complete(result, err, context, conflict_file, opts, verification_callback)
-  end
-
+  -- Simplify callback structure by using a direct callback function
   require("avante.llm_tools.dispatch_full_agent").func({
     prompt = Utils.read_template("_conflict-verification.avanterules", {
       conflict_file = conflict_file,
@@ -592,7 +644,9 @@ local function verify_conflict_resolution(conflict_file, context, opts, verifica
     })
   }, {
     on_log = opts.on_log or function() end,
-    on_complete = on_verification_complete,
+    on_complete = function(result, err)
+      handle_verification_complete(result, err, context, conflict_file, opts, verification_callback)
+    end,
     session_ctx = opts.session_ctx or {},
     store = {
       messages = {}
@@ -735,9 +789,8 @@ end
 ---@param context ConflictResolutionContext
 ---@param opts table Optional configuration options
 ---@param resolution_errors table Table to collect resolution errors
----@param index integer Index of the conflict file being processed
 ---@param callback fun(success: boolean, error: string | nil): nil Final callback
-local function handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, index, callback)
+local function handle_verification_result(is_valid, issues, conflict_file, context, opts, resolution_errors, callback)
   if not is_valid then
     -- Resolution verification failed - create a more detailed error message
     local conflict_markers_found = false
@@ -816,11 +869,15 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
         errors = issues or {"Unknown verification issues"}
       })
 
-      -- Complete this operation but don't move to next file yet
+      -- Complete this operation
       complete_operation(context, nil, false, error_msg)
 
-      -- Process the same file again (don't increment index)
-      return process_next_conflict(index, context, opts, resolution_errors, callback)
+      -- Don't increment the file index, retry the same file
+      if not context.processing_next_file then
+        context.processing_next_file = true
+        process_conflict_files(context, opts, resolution_errors, callback)
+      end
+      return
     else
       -- Max attempts reached for this file, log and move on
       log_resolution_update(context, {
@@ -832,9 +889,15 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
         errors = {"Failed to resolve after maximum attempts"}
       })
 
-      -- Complete this operation and move to next file
+      -- Complete this operation
       complete_operation(context, nil, false, error_msg)
-      return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+
+      -- Move to the next file
+      if not context.processing_next_file then
+        context.processing_next_file = true
+        context.current_file_index = context.current_file_index + 1
+        process_conflict_files(context, opts, resolution_errors, callback)
+      end
     end
   else
     -- Verification passed, proceed with staging
@@ -888,9 +951,15 @@ local function handle_verification_result(is_valid, issues, conflict_file, conte
       end
     end
 
-    -- Complete this operation and move to next file
+    -- Complete this operation
     complete_operation(context, nil, true, nil)
-    return process_next_conflict(index + 1, context, opts, resolution_errors, callback)
+
+    -- Move to the next file
+    if not context.processing_next_file then
+      context.processing_next_file = true
+      context.current_file_index = context.current_file_index + 1
+      process_conflict_files(context, opts, resolution_errors, callback)
+    end
   end
 end
 
