@@ -86,6 +86,15 @@ end
 
 ---@type avante.LLMToolOnRender<avante.DispatchAgentInput>
 function M.on_render(input, opts)
+  return M._render_agent_task(input, opts, "Subtask")
+end
+
+-- Helper function that can be reused by other agent implementations
+---@param input table The input containing the prompt
+---@param opts table Options containing result_message and store
+---@param task_name string The name of the task (e.g., "Subtask", "Full agent task")
+---@return table[] lines Array of Line objects for rendering
+M._render_agent_task = function(input, opts, task_name)
   local result_message = opts.result_message
   local store = opts.store or {}
   local messages = store.messages or {}
@@ -136,6 +145,20 @@ function M.on_render(input, opts)
               summary = string.format("View %s: %d lines", path, #lines)
             end
           end
+        elseif tool_use.name == "str_replace" or tool_use.name == "write_to_file" or tool_use.name == "edit_file" then
+          local path = tool_use.input.path
+          if tool_result.is_error then
+            summary = string.format("%s %s: failed", tool_use.name, path)
+          else
+            summary = string.format("%s %s: success", tool_use.name, path)
+          end
+        else
+          -- Generic summary for other tools
+          if tool_result.is_error then
+            summary = string.format("%s: failed", tool_use.name)
+          else
+            summary = string.format("%s: success", tool_use.name)
+          end
         end
       end
       if summary then summary = "  " .. Utils.icon("🛠️ ") .. summary end
@@ -162,7 +185,7 @@ function M.on_render(input, opts)
     end
   end
   local lines = {}
-  table.insert(lines, Line:new({ { icon .. "Subtask " .. state, hl } }))
+  table.insert(lines, Line:new({ { icon .. task_name .. " " .. state, hl } }))
   table.insert(lines, Line:new({ { "" } }))
   table.insert(lines, Line:new({ { "  Task:" } }))
   local prompt_lines = vim.split(input.prompt or "", "\n")
@@ -182,6 +205,23 @@ end
 
 ---@type AvanteLLMToolFunc<avante.DispatchAgentInput>
 function M.func(input, opts)
+  local system_prompt_template = [[You are a helpful assistant with access to various tools.
+Your task is to help the user with their request: "${prompt}"
+Be thorough and use the tools available to you to find the most relevant information.
+When you're done, provide a clear and concise summary of what you found.]]
+
+  return M._execute_agent_loop(input, opts, {
+    tools = get_available_tools(),
+    system_prompt_template = system_prompt_template,
+    agent_name = "dispatch_agent",
+  })
+end
+
+-- Helper function that can be reused by other agent implementations
+---@param input table The input containing the prompt
+---@param opts table Options containing on_log, on_complete, session_ctx, set_store
+---@param config table Configuration containing tools, system_prompt_template, agent_name
+M._execute_agent_loop = function(input, opts, config)
   local on_log = opts.on_log
   local on_complete = opts.on_complete
   local session_ctx = opts.session_ctx
@@ -190,15 +230,12 @@ function M.func(input, opts)
   if not on_complete then return false, "on_complete not provided" end
 
   local prompt = input.prompt
-  local tools = get_available_tools()
+  local tools = config.tools
   local start_time = Utils.get_timestamp()
 
   if on_log then on_log("prompt: " .. prompt) end
 
-  local system_prompt = ([[You are a helpful assistant with access to various tools.
-Your task is to help the user with their request: "${prompt}"
-Be thorough and use the tools available to you to find the most relevant information.
-When you're done, provide a clear and concise summary of what you found.]]):gsub("${prompt}", prompt)
+  local system_prompt = config.system_prompt_template:gsub("${prompt}", prompt)
 
   local history_messages = {}
   local tool_use_messages = {}
@@ -247,14 +284,15 @@ When you're done, provide a clear and concise summary of what you found.]]):gsub
     end,
     on_complete = function(err)
       if err ~= nil then
-        err = string.format("dispatch_agent failed: %s", vim.inspect(err))
+        err = string.format("%s failed: %s", config.agent_name, vim.inspect(err))
         on_complete(err, nil)
         return
       end
       local end_time = Utils.get_timestamp()
       local elapsed_time = Utils.datetime_diff(start_time, end_time)
       local tool_use_count = vim.tbl_count(tool_use_messages)
-      local summary = "dispatch_agent Done ("
+      local summary = config.agent_name
+        .. " Done ("
         .. (tool_use_count <= 1 and "1 tool use" or tool_use_count .. " tool uses")
         .. " · "
         .. math.ceil(total_tokens)
