@@ -115,7 +115,16 @@ function M.func(input, opts)
   local system_prompt_template = [[You are a helpful assistant with access to a comprehensive set of tools for working with code.
 Your task is to help the user with their request: "${prompt}"
 Be thorough and use the tools available to you to find the most relevant information and make the necessary changes.
-When you're done, provide a clear and concise summary of what you found and what changes you made.]]
+When you're done, provide a clear and concise summary of what you found and what changes you made.
+
+IMPORTANT: In your final report, include any important learnings or insights you discovered during your execution that could help the main agent or subsequent agent invocations. This includes:
+- Important patterns, conventions, or architectural decisions in the codebase
+- Key files, modules, or functions that are central to the task domain
+- Any gotchas, edge cases, or important details to be aware of
+- Useful context about how different parts of the codebase interact
+- Any best practices or coding standards you observed
+
+Include this information in a "Key Learnings" section at the end of your attempt_completion result.]]
 
   return DispatchAgent._execute_agent_loop(input, opts, {
     tools = get_available_tools(),
