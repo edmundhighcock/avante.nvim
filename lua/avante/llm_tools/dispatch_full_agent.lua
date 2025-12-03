@@ -124,7 +124,13 @@ IMPORTANT: In your final report, include any important learnings or insights you
 - Useful context about how different parts of the codebase interact
 - Any best practices or coding standards you observed
 
-Include this information in a "Key Learnings" section at the end of your attempt_completion result.]]
+IMPORTANT: Track and report all MCP tools loaded during execution:
+- If you use the load_mcp_tool function during your execution, keep track of which tools you loaded
+- In your final attempt_completion result, include a "Loaded MCP Tools" section that lists all MCP tools you loaded (format: "server_name/tool_name")
+- This allows the main agent to inform future agent invocations to skip loading these tools again, improving performance
+- If you did not load any MCP tools, you can omit this section
+
+Include this information in a "Key Learnings" section at the end of your attempt_completion result, followed by the "Loaded MCP Tools" section if applicable.]]
 
   return DispatchAgent._execute_agent_loop(input, opts, {
     tools = get_available_tools(),
