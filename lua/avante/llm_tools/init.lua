@@ -698,6 +698,7 @@ end
 
 ---@type AvanteLLMTool[]
 M._tools = {
+  require("avante.llm_tools.dispatch_full_agent"),
   require("avante.llm_tools.dispatch_agent"),
   require("avante.llm_tools.glob"),
   require("avante.llm_tools.load_tool"),
